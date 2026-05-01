@@ -1,5 +1,7 @@
 # methylQC
 
+<img width="911" height="466" alt="methylQC overview" src="https://github.com/user-attachments/assets/c5c77b8f-d3ca-4413-8643-62a326a4dfe0" />
+
 **QC pipeline for Illumina DNA methylation arrays**
 
 `methylQC` wraps [SeSAMe](https://bioconductor.org/packages/sesame/), [EpiDISH](https://bioconductor.org/packages/EpiDISH/), and standard Bioconductor tools into a two-stage pipeline for Illumina Infinium arrays (EPIC, EPICv2, 450K).
