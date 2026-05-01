@@ -1,0 +1,20 @@
+# R project files
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Build artifacts
+*.o
+*.so
+*.dll
+inst/doc
+
+# Data files (never commit raw data)
+*.idat
+*.rds
+
+# OS files
+.DS_Store
+Thumbs.db
