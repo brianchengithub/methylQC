@@ -19,10 +19,12 @@
 #'   Default c("cg", "ch"). Use "cg" for CpG only. NULL keeps all.
 #'   Note: sex chromosome probes are handled separately by \code{exclude_sex},
 #'   not by this argument.
-#' @param impute Logical; if TRUE, impute remaining NAs via chunked
-#'   k-NN after all masking/filtering (default FALSE).
-#' @param knn_k Number of nearest neighbors (default 10).
-#' @param chunk_size Probes per imputation block (default 50000).
+#' @param impute Logical; if TRUE, impute remaining NAs via
+#'   similarity-based k-NN after all masking/filtering (default FALSE).
+#' @param knn_k Number of nearest-neighbour samples (default from
+#'   options, 50).
+#' @param knn_var_probes Number of most-variable probes used to compute
+#'   sample-to-sample distances (default from options, 30000).
 #' @return Filtered numeric matrix.
 #' @examples
 #' \dontrun{
@@ -64,9 +66,12 @@ apply_mask <- function(mat,
                        platform = NULL,
                        probe_types = c("cg", "ch"),
                        impute = FALSE,
-                       knn_k = 10L,
-                       chunk_size = 50000L) {
+                       knn_k = NULL,
+                       knn_var_probes = NULL) {
   stopifnot(is.matrix(mat) && is.numeric(mat))
+  cfg <- methylQC_options()
+  knn_k          <- knn_k          %||% cfg$knn_k
+  knn_var_probes <- knn_var_probes %||% cfg$knn_var_probes
 
   # Step 1: Quality mask
   if (!is.null(mask)) { stopifnot(identical(dim(mask), dim(mat))); mat[mask] <- NA }
@@ -100,43 +105,108 @@ apply_mask <- function(mat,
     mat <- mat[grepl(pattern, rownames(mat)), , drop = FALSE]
   }
 
-  # Step 7: Optional k-NN imputation
+  # Step 7: Optional similarity-based k-NN imputation
   if (impute) {
     n_na <- sum(is.na(mat))
-    if (n_na > 0) mat <- impute_knn_chunked(mat, k = knn_k, chunk_size = chunk_size)
+    if (n_na > 0) {
+      mat <- impute_knn_similarity(mat, k = knn_k,
+                                   n_var_probes = knn_var_probes)
+    }
   }
 
   mat
 }
 
-#' Chunked k-NN imputation (internal)
+#' Similarity-based k-NN imputation
+#'
+#' Imputes missing values from the most similar samples. Sample-to-
+#' sample Euclidean distances are computed on the top
+#' \code{n_var_probes} most-variable probes; restricting to variable
+#' probes is what makes "nearest" biologically meaningful, since the
+#' bulk of the array is near-constant and would otherwise dominate the
+#' distance. Each missing value is filled with the inverse-distance-
+#' weighted mean of the \code{k} nearest-neighbour samples' values at
+#' that probe.
+#'
+#' There is no constant fallback: a value missing in a sample and in
+#' all of its usable neighbours is left as NA.
+#'
+#' @param mat Numeric matrix (probes x samples).
+#' @param k Number of nearest-neighbour samples (default 50).
+#' @param n_var_probes Number of most-variable probes used for the
+#'   distance computation (default 30000).
+#' @return The matrix with imputable NAs filled.
 #' @keywords internal
 #' @noRd
-impute_knn_chunked <- function(mat, k = 10L, chunk_size = 50000L) {
-  n_probes <- nrow(mat); n_chunks <- ceiling(n_probes / chunk_size)
-  message(sprintf("  Imputing NAs: k-NN (k=%d) in %d chunks of ~%d probes...", k, n_chunks, chunk_size))
+impute_knn_similarity <- function(mat, k = 50L, n_var_probes = 30000L) {
+  n_samples <- ncol(mat)
+  if (n_samples < 2L) {
+    message("  Imputation skipped: need >= 2 samples.")
+    return(mat)
+  }
+  k <- min(as.integer(k), n_samples - 1L)
+
+  # --- Select most-variable probes for the distance computation ---
+  pvar <- matrixStats::rowVars(mat, na.rm = TRUE)
+  pvar[is.na(pvar)] <- -Inf
+  n_var <- min(as.integer(n_var_probes), sum(is.finite(pvar)))
+  var_idx <- order(pvar, decreasing = TRUE)[seq_len(n_var)]
+  anchor <- mat[var_idx, , drop = FALSE]
+  message(sprintf(
+    "  Imputing NAs: similarity k-NN (k=%d) on %d most-variable probes...",
+    k, n_var))
+
+  # --- Sample-to-sample Euclidean distance ---
+  # Computed over pairwise-complete probes and rescaled to a full-length
+  # Euclidean distance, so partial probe overlap between two samples is
+  # handled gracefully.
+  dmat <- matrix(NA_real_, n_samples, n_samples,
+                 dimnames = list(colnames(mat), colnames(mat)))
+  diag(dmat) <- 0
+  for (a in seq_len(n_samples - 1L)) {
+    va <- anchor[, a]
+    for (b in seq.int(a + 1L, n_samples)) {
+      vb <- anchor[, b]
+      ok <- !is.na(va) & !is.na(vb)
+      d <- if (sum(ok) >= 10L) {
+        sqrt(mean((va[ok] - vb[ok])^2) * nrow(anchor))
+      } else NA_real_
+      dmat[a, b] <- d
+      dmat[b, a] <- d
+    }
+  }
+
+  # --- Impute each missing value from nearest-neighbour samples ---
   out <- mat
-  for (i in seq_len(n_chunks)) {
-    idx <- ((i - 1L) * chunk_size + 1L):min(i * chunk_size, n_probes)
-    chunk <- mat[idx, , drop = FALSE]
-    if (!anyNA(chunk)) next
-    chunk_imp <- tryCatch({
-      invisible(utils::capture.output(
-        result <- impute::impute.knn(chunk, k = k, rowmax = 0.8, colmax = 0.95), file = nullfile()))
-      result$data
-    }, error = function(e) {
-      message(sprintf("    chunk %d/%d: k-NN failed, using row means", i, n_chunks))
-      rm <- rowMeans(chunk, na.rm = TRUE)
-      for (j in seq_len(ncol(chunk))) { na_r <- is.na(chunk[, j]); chunk[na_r, j] <- rm[na_r] }
-      chunk
-    })
-    out[idx, ] <- chunk_imp; rm(chunk, chunk_imp); gc(verbose = FALSE)
+  eps <- 1e-6
+  n_filled <- 0L
+  for (s in seq_len(n_samples)) {
+    na_rows <- which(is.na(mat[, s]))
+    if (length(na_rows) == 0L) next
+
+    # Rank the other samples by distance to sample s
+    d_s <- dmat[, s]
+    d_s[s] <- NA_real_
+    ord <- order(d_s, na.last = NA)            # drops NA-distance samples
+    if (length(ord) == 0L) next
+    nn <- utils::head(ord, k)
+    w  <- 1 / (d_s[nn] + eps)
+
+    nn_block <- mat[na_rows, nn, drop = FALSE]  # probes x neighbours
+    wmat <- matrix(w, nrow = length(na_rows), ncol = length(nn),
+                   byrow = TRUE)
+    wmat[is.na(nn_block)] <- 0                  # ignore NA neighbours
+    wsum <- rowSums(wmat)
+    num  <- rowSums(wmat * ifelse(is.na(nn_block), 0, nn_block))
+    imp  <- ifelse(wsum > 0, num / wsum, NA_real_)
+
+    fill <- !is.na(imp)
+    out[na_rows[fill], s] <- imp[fill]
+    n_filled <- n_filled + sum(fill)
   }
-  still_na <- which(rowSums(is.na(out)) > 0)
-  if (length(still_na) > 0) {
-    message(sprintf("  %d probes still NA after k-NN; filling with 0.5", length(still_na)))
-    for (i in still_na) out[i, is.na(out[i, ])] <- 0.5
-  }
-  message(sprintf("  Imputation complete. Remaining NAs: %d", sum(is.na(out))))
+
+  message(sprintf("  Imputation complete. Values filled: %d; remaining NAs: %d",
+                  n_filled, sum(is.na(out))))
   out
 }
+

@@ -5,14 +5,19 @@ Authors@R: person("Brian", "Chen", role = c("aut", "cre"),
                   email = "brianchen450k@gmail.com")
 Description: Two-stage QC pipeline for Illumina Infinium DNA methylation
     arrays (EPIC, EPICv2, 450K). Stage 1 streams samples through SeSAMe
-    openSesame, computes per-sample QC metrics (detection rate, intensity,
-    Horvath epigenetic age, sex chromosome intensities), and extracts SNP
-    probe betas. Stage 2 flags samples and probes, generates a multi-page
-    QC report PDF, runs EpiDISH cell-type deconvolution for blood tissues,
-    and outputs a consolidated sample sheet. Raw matrices are output with
-    separate quality mask and detection p-value matrices. Users apply their
-    own exclusion criteria via apply_mask(), which supports optional k-NN
-    imputation.
+    openSesame (prep code "QCDPB": quality masking, channel inference,
+    dye-bias correction, pOOBAH detection p-values, and noob background
+    correction), computes per-sample QC metrics (detection rate,
+    intensity, Horvath epigenetic age, sex chromosome intensities), and
+    extracts SNP probe betas. Stage 2 flags samples and probes, generates
+    a multi-page QC report PDF, runs EpiDISH cell-type deconvolution as a
+    purity check on blood-derived tissues, and outputs a consolidated
+    sample sheet. Unmasked, noob-corrected beta and M-value matrices are
+    output with separate quality-mask and detection p-value matrices.
+    Users apply their own exclusion criteria via apply_mask(), which
+    supports optional similarity-based k-NN imputation. Optional EPICv2
+    replicate de-duplication and probe-ID harmonization to legacy
+    platforms is provided via harmonize_epicv2().
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -20,14 +25,13 @@ RoxygenNote: 7.3.3
 Depends:
     R (>= 4.1.0)
 Imports:
-    sesame,
-    sesameData,
+    sesame (>= 1.20.0),
+    sesameData (>= 1.20.0),
+    EpiDISH (>= 2.18.0),
     dplyr,
-    ggplot2,
+    ggplot2 (>= 3.4.0),
     gridExtra,
-    matrixStats,
-    impute,
-    EpiDISH,
+    matrixStats (>= 0.62.0),
     methods,
     stats,
     utils,

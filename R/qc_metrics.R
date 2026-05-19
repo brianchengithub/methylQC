@@ -55,8 +55,10 @@ compute_qc_metrics <- function(sdfs, platform, logger = NULL) {
   decomp_df$sample_id <- names(sdfs)
   qc_df <- merge(qc_df, decomp_df, by = "sample_id", sort = FALSE)
 
+  # Horvath age: unmasked, noob-corrected betas (sdfs are final QCDPB
+  # SigDFs when keep_sdfs = TRUE). mask = FALSE keeps every probe.
   qc_df$horvath_age <- vapply(sdfs, function(s)
-    predict_horvath_age(sesame::getBetas(s)), numeric(1))
+    predict_horvath_age(sesame::getBetas(s, mask = FALSE)), numeric(1))
 
   sex_int <- compute_sex_intensities_from_sdfs(sdfs)
   if (!is.null(sex_int)) qc_df <- merge(qc_df, sex_int, by="sample_id", sort=FALSE)
@@ -68,13 +70,26 @@ compute_qc_metrics <- function(sdfs, platform, logger = NULL) {
 }
 
 #' Streaming QC metrics
+#'
+#' For each sample two SigDFs are derived: a pre-noob SigDF (prep code
+#' up to and including P) used for the QC statistics, sex chromosome
+#' intensities, and mean intensity; and a noob-corrected SigDF (full
+#' prep code) used only for the Horvath clock betas. Sex and intensity
+#' metrics intentionally use the non-noob signal (noob only subtracts
+#' background and cannot recover weak signal, so it offers no benefit
+#' for chromosome-presence calls).
 #' @export
 compute_qc_metrics_streaming <- function(basenames, platform, logger = NULL) {
+  cfg <- methylQC_options()
+  prep_code <- cfg$prep_code
+  prep_preP <- sub("B.*$", "", prep_code)
+  has_noob  <- grepl("B", prep_code)
   if (!is.null(logger))
     logger$log("qc_metrics", sprintf("streaming QC stats for %d samples...", length(basenames)))
 
   qc_rows <- lapply(basenames, function(bn) {
-    sdf <- sesame::openSesame(bn, platform=platform, func=NULL)
+    # Pre-noob SigDF: QC stats, sex intensities, mean intensity
+    sdf <- sesame::openSesame(bn, platform=platform, prep=prep_preP, func=NULL)
     q <- sesame::sesameQC_calcStats(sdf, funs=c("detection","intensity","numProbes","channel","dyeBias"))
     stat <- q@stat
     scalars <- stat[vapply(stat, function(x) length(x)==1, logical(1))]
@@ -104,10 +119,18 @@ compute_qc_metrics_streaming <- function(basenames, platform, logger = NULL) {
       qr$frac_detection_among_unmasked <- if(n_total-nma>0) qr$n_detected/(n_total-nma) else NA_real_
       qr$frac_usable <- nu/n_total
     }
-    qr$horvath_age <- predict_horvath_age(sesame::getBetas(sdf))
+    # Sex chromosome intensities: non-noob signal
     si <- compute_sex_intensities_single(sdf)
     qr$sex_chrX_intensity <- si$chrX; qr$sex_chrY_intensity <- si$chrY
-    rm(sdf); gc(verbose=FALSE)
+
+    # Horvath clock: noob-corrected, unmasked betas
+    sdf_noob <- if (has_noob) {
+      sesame::openSesame(bn, platform=platform, prep=prep_code, func=NULL)
+    } else sdf
+    qr$horvath_age <- predict_horvath_age(
+      sesame::getBetas(sdf_noob, mask = FALSE))
+
+    rm(sdf, sdf_noob); gc(verbose=FALSE)
     qr
   })
 
@@ -125,17 +148,50 @@ compute_qc_metrics_streaming <- function(basenames, platform, logger = NULL) {
 }
 
 #' Predict Horvath (2013) epigenetic age
+#'
+#' Per-CpG value precedence for the 353 clock probes:
+#' \enumerate{
+#'   \item Probe present on the platform: use the actual (noob-corrected,
+#'     unmasked) beta value. A present-but-failed probe still contributes
+#'     its real value; the clock is a coarse QC screen and is not
+#'     re-imputed here.
+#'   \item Probe absent from the platform manifest: use the hard-coded
+#'     zero-shot reference median (see \code{.horvath_zeroshot_betas}),
+#'     derived from HM450 blood samples.
+#' }
+#' There is no 0.5 fallback. A clock CpG that is neither present nor in
+#' the zero-shot reference contributes nothing (its coefficient is
+#' dropped), and the prediction is returned as NA if fewer than 200 of
+#' the 353 CpGs can be resolved.
+#'
+#' @param betas Named numeric vector of beta values.
+#' @return Predicted epigenetic age in years, or NA.
 #' @keywords internal
 #' @noRd
 predict_horvath_age <- function(betas) {
   tryCatch({
     if (is.null(names(betas))) return(NA_real_)
+    bv <- rep(NA_real_, length(.horvath_probes))
+    names(bv) <- .horvath_probes
+
+    # (1) Probe present on the platform -> actual beta
     present <- intersect(.horvath_probes, names(betas))
-    if (length(present) < 200) return(NA_real_)
-    idx <- match(present, .horvath_probes)
-    bv <- betas[present]; bv[is.na(bv)] <- 0.5
-    x <- .horvath_intercept + sum(.horvath_coefficients[idx] * bv)
-    if (x < 0) 21*exp(x)-1 else 21*x+20
+    if (length(present)) bv[present] <- betas[present]
+
+    # (2) Probe absent from the platform -> zero-shot reference median
+    absent <- .horvath_probes[is.na(bv)]
+    zs <- intersect(absent, names(.horvath_zeroshot_betas))
+    if (length(zs)) bv[zs] <- .horvath_zeroshot_betas[zs]
+
+    # A present-but-failed probe may still be NA in `betas`; keep its
+    # actual (possibly NA) value rather than imputing. Drop only the
+    # CpGs that remain unresolvable.
+    usable <- which(!is.na(bv))
+    if (length(usable) < 200) return(NA_real_)
+
+    x <- .horvath_intercept +
+         sum(.horvath_coefficients[usable] * bv[usable])
+    if (x < 0) 21 * exp(x) - 1 else 21 * x + 20
   }, error = function(e) NA_real_)
 }
 

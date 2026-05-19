@@ -41,7 +41,15 @@ methylQC_defaults <- function() {
 
     # ---- Processing ----
     n_cores   = 1L,
-    save_sdfs = FALSE,
+    save_sdfs = TRUE,
+
+    # ---- SeSAMe preprocessing ----
+    # prep code passed to openSesame. "QCDPB" = Quality mask, Channel
+    # inference, Dye-bias correction, detection P-values (pOOBAH), and
+    # noob Background correction. pOOBAH (P) runs BEFORE noob (B), so
+    # detection p-values are computed on non-noob signal, while the
+    # output betas/M-values are noob-corrected.
+    prep_code = "QCDPB",
 
     # ---- QC thresholds ----
     detP_thresh     = 0.05,
@@ -53,15 +61,39 @@ methylQC_defaults <- function() {
     # Number of most-variable probes used for MDS and PCA
     n_top_variable = 100000L,
 
+    # ---- k-NN imputation (apply_mask) ----
+    # Imputation uses the top knn_var_probes most-variable probes to
+    # compute sample-to-sample Euclidean distance, then imputes each
+    # missing value as the inverse-distance-weighted mean of the
+    # knn_k nearest neighbours.
+    knn_k          = 50L,
+    knn_var_probes = 30000L,
+
     # ---- EpiDISH ----
-    epidish_reference  = "centDHSbloodDMC.m",
+    # Default reference is the 12 immune cell-type panel (cent12CT.m),
+    # used as a purity check for both whole blood and isolated/sorted
+    # blood cell populations.
+    epidish_reference  = "cent12CT.m",
     epidish_method     = "RPC",
     epidish_cell_types = c("PBMC", "WB", "WBC", "buffy", "buffy coat",
-                           "whole blood", "blood"),
+                           "whole blood", "blood",
+                           "CD4CM", "CD4EM", "CD4N", "CD8CM", "CD8EM",
+                           "CD8N", "BN", "BM", "NK", "Mono", "Granulo",
+                           "B", "B cell", "T cell", "monocyte",
+                           "granulocyte", "neutrophil", "eosinophil",
+                           "basophil", "lymphocyte", "leukocyte"),
 
-    # ---- SeSAMe ----
+    # ---- SeSAMe replicate probe collapsing (legacy openSesame path) ----
     collapse_to_pfx = FALSE,
-    collapse_method = "mean"
+    collapse_method = "mean",
+
+    # ---- EPICv2 de-duplication + probe ID harmonization ----
+    # When TRUE: for EPICv2 data, replicate probes (sharing a cg/ch
+    # prefix) are de-duplicated by selecting the probe with the fewest
+    # cross-sample detection failures (ties -> first probe), then probe
+    # IDs are harmonized to the target platform via sesameData mappings.
+    epicv2_harmonize = FALSE,
+    epicv2_target    = "EPIC"
   )
 }
 
@@ -153,4 +185,11 @@ normalize_sex <- function(x, col_name = "") {
       do.call(options, stats::setNames(list(defaults[[k]]), opt_name))
     }
   }
+}
+
+.onAttach <- function(libname, pkgname) {
+  v <- tryCatch(as.character(utils::packageVersion(pkgname)),
+                error = function(e) "")
+  packageStartupMessage(
+    sprintf("methylQC %s -- run check_dependencies() to verify your environment.", v))
 }

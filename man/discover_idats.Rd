@@ -2,7 +2,7 @@
 % Please edit documentation in R/discover_idats.R
 \name{discover_idats}
 \alias{discover_idats}
-\title{Discover IDAT files and optional sample sheets in nested folders}
+\title{Discover IDAT files and sample sheets under a single root directory}
 \usage{
 discover_idats(
   idat_root,
@@ -13,13 +13,16 @@ discover_idats(
 )
 }
 \arguments{
-\item{idat_root}{Top-level directory.}
+\item{idat_root}{Top-level directory. IDATs and sample sheets are
+searched for recursively, confined to this tree.}
 
-\item{sample_sheet_pattern}{Regex for sheet filenames; NULL to skip.}
+\item{sample_sheet_pattern}{Regex for sheet filenames; NULL to skip
+sheet discovery entirely (all rows synthesized).}
 
 \item{basename_col}{Preferred basename column name.}
 
-\item{expected_platform}{Optional platform string for cross-folder check.}
+\item{expected_platform}{Optional platform string for a cross-folder
+sanity check (mismatch is a warning).}
 
 \item{logger}{Optional logger.}
 }
@@ -28,7 +31,5 @@ A data.frame with at least Basename, sample_id, batch_folder,
 sheet_path, detected_platform, Chip, Row, Col.
 }
 \description{
-Walks \code{in_dir} recursively, reads or synthesizes a sample sheet
-per folder, detects platform from IDAT headers, and decomposes each
-basename into \code{Chip}, \code{Row}, and \code{Col} columns.
+Discover IDAT files and sample sheets under a single root directory
 }

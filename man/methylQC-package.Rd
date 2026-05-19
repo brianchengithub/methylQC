@@ -6,14 +6,21 @@
 \alias{methylQC-package}
 \title{methylQC: Illumina Methylation Array QC and Preprocessing}
 \description{
-A reproducible pipeline for Illumina methylation array data using
-SeSAMe for preprocessing and QC, EpiDISH for cell-type deconvolution,
-and EpiDISH for cell-type deconvolution of blood tissues.
+A reproducible two-stage pipeline for Illumina DNA methylation array
+data. Stage 1 streams IDATs through SeSAMe (openSesame, prep code
+"QCDPB"), producing unmasked noob-corrected beta and M-value matrices
+alongside separate quality-mask and detection p-value matrices, and
+computes per-sample QC metrics. Stage 2 flags samples and probes,
+generates a multi-page QC diagnostic report, and runs EpiDISH
+cell-type deconvolution as a purity check on blood-derived tissues.
+Optional EPICv2 replicate de-duplication and probe-ID harmonization,
+and similarity-based k-NN imputation, are also provided.
 }
 \section{Quick start}{
 
 \preformatted{
 library(methylQC)
+check_dependencies()         # verify the environment once
 
 # Stage 1: QC and preprocessing (auto-detects platform)
 stage1 <- qc(
@@ -23,7 +30,7 @@ stage1 <- qc(
 
 # Review exclusion CSVs in `results/`, edit if needed, then:
 
-# Stage 2: prep — apply exclusions, impute, deconvolve
+# Stage 2: prep — flag samples/probes, QC report, deconvolution
 stage2 <- prep(stage1_dir = "results")
 }
 }

@@ -23,6 +23,38 @@ qc <- function(in_dir, out_dir, platform = NULL, ...) {
   if (!is.null(res$mask)) saveRDS(res$mask, file.path(out_dir, "mask_all.rds"))
   if (!is.null(res$detP)) saveRDS(res$detP, file.path(out_dir, "detP_all.rds"))
   if (cfg$save_sdfs && !is.null(res$sdfs)) saveRDS(res$sdfs, file.path(out_dir, "sdfs_all.rds"))
+
+  # --- Optional EPICv2 de-duplication + probe ID harmonization ---
+  # Only applies to EPICv2 data and only when explicitly enabled.
+  if (isTRUE(cfg$epicv2_harmonize) && grepl("EPICv2|EPIC2|MSA", platform, ignore.case = TRUE)) {
+    logger$log("epicv2", sprintf("harmonizing EPICv2 -> %s (de-dup + mLiftOver)",
+                                 cfg$epicv2_target))
+    h <- harmonize_epicv2(
+      mat = res$betas, detP = res$detP,
+      target_platform = cfg$epicv2_target,
+      detP_thresh = cfg$detP_thresh,
+      dedup_log_path = file.path(out_dir, "epicv2_dedup_log.csv"),
+      return_details = TRUE,
+      logger = logger)
+    res$betas <- h$mat
+    # M-values are re-derived from the harmonized betas. The mask and
+    # detection p-value matrices are put through the SAME de-dup +
+    # ID-rename (via the returned id_map) so all four matrices share
+    # the harmonized probe set and probe IDs.
+    res$mvals <- log2((res$betas + 1e-6) / (1 - res$betas + 1e-6))
+    if (!is.null(res$mask)) {
+      res$mask <- apply_epicv2_map(res$mask, h$kept_ids, h$id_map, fill = FALSE)
+    }
+    if (!is.null(res$detP)) {
+      res$detP <- apply_epicv2_map(res$detP, h$kept_ids, h$id_map, fill = NA_real_)
+    }
+    saveRDS(res$betas, file.path(out_dir, "betas_all.rds"))
+    saveRDS(res$mvals, file.path(out_dir, "mvals_all.rds"))
+    if (!is.null(res$mask)) saveRDS(res$mask, file.path(out_dir, "mask_all.rds"))
+    if (!is.null(res$detP)) saveRDS(res$detP, file.path(out_dir, "detP_all.rds"))
+    logger$log("epicv2", sprintf("harmonized matrices written (%d probes)",
+                                 nrow(res$betas)))
+  }
   rs_mat <- extract_snp_betas(res$betas, logger = logger)
   if (!is.null(rs_mat)) { saveRDS(rs_mat, file.path(out_dir, "snp_betas.rds"))
     logger$log("start", sprintf("wrote snp_betas.rds (%d x %d)", nrow(rs_mat), ncol(rs_mat))) }

@@ -15,8 +15,8 @@ apply_mask(
   platform = NULL,
   probe_types = c("cg", "ch"),
   impute = FALSE,
-  knn_k = 10L,
-  chunk_size = 50000L
+  knn_k = NULL,
+  knn_var_probes = NULL
 )
 }
 \arguments{
@@ -44,12 +44,14 @@ Default c("cg", "ch"). Use "cg" for CpG only. NULL keeps all.
 Note: sex chromosome probes are handled separately by \code{exclude_sex},
 not by this argument.}
 
-\item{impute}{Logical; if TRUE, impute remaining NAs via chunked
-k-NN after all masking/filtering (default FALSE).}
+\item{impute}{Logical; if TRUE, impute remaining NAs via
+similarity-based k-NN after all masking/filtering (default FALSE).}
 
-\item{knn_k}{Number of nearest neighbors (default 10).}
+\item{knn_k}{Number of nearest-neighbour samples (default from
+options, 50).}
 
-\item{chunk_size}{Probes per imputation block (default 50000).}
+\item{knn_var_probes}{Number of most-variable probes used to compute
+sample-to-sample distances (default from options, 30000).}
 }
 \value{
 Filtered numeric matrix.

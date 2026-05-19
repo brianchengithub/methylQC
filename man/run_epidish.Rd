@@ -6,6 +6,21 @@
 \usage{
 run_epidish(betas, reference = NULL, method = NULL, logger = NULL)
 }
+\arguments{
+\item{betas}{Numeric beta matrix (probes x samples), unmasked.}
+
+\item{reference}{Reference panel name, or a character vector of
+names to run multiple panels. Default from options
+(\code{cent12CT.m}).}
+
+\item{method}{EpiDISH method ("RPC", "CBS", or "CP").}
+
+\item{logger}{Optional logger.}
+}
+\value{
+If a single reference: a numeric matrix (samples x cell
+types). If multiple references: a named list of such matrices.
+}
 \description{
 Run EpiDISH deconvolution on a beta matrix
 }

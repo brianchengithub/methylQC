@@ -1,22 +1,3 @@
-###############################################################################
-# horvath_clock.R — Hardcoded Horvath (2013) epigenetic clock coefficients
-#
-# Contains the 353 CpG probe IDs, their regression coefficients, and the
-# intercept (0.695507258) from Horvath (2013) Genome Biology 14:R115,
-# Additional File 3 (Supplementary Table).
-#
-# These are hardcoded because SeSAMe's predictAge() silently returns NA
-# when its clock data cache is unavailable. Hardcoding ensures consistent,
-# environment-independent age predictions.
-#
-# The age transformation (anti-trafo) converts the weighted sum back to
-# chronological years:
-#   if x < 0:  age = 21 * exp(x) - 1
-#   if x >= 0: age = 21 * x + 20
-#
-# Minimum 200/353 probes must be present for a valid prediction.
-# Missing betas are imputed with 0.5 (uninformative midpoint).
-###############################################################################
 #' Horvath (2013) epigenetic clock coefficients
 #' 
 #' 353 CpG probes + intercept from Horvath (2013) Genome Biology.
@@ -122,3 +103,37 @@
   -0.002315093, -0.028135965, -0.004461622, -0.120291759, -0.216624999, -0.030298685, -0.361822974, -0.043863368,
   -0.166268862, -0.159361013, -0.506521375, -0.144822054, 0.549029142, -0.466528425, -0.035326263, -0.138635766,
   -0.869124446)
+
+#' Zero-shot reference beta values for Horvath clock CpGs
+#'
+#' Median beta values for 19 Horvath (2013) clock CpGs that may be
+#' absent from the EPIC or EPICv2 manifests. Computed from a large
+#' reference dataset of HM450 blood samples. These are used ONLY to
+#' fill clock CpGs that are genuinely absent from the array platform
+#' (i.e., k-NN imputation is impossible because there is no data
+#' column at all). Probes that are present but failed detection still
+#' use their actual (noob-corrected, unmasked) beta value.
+#'
+#' @keywords internal
+#' @noRd
+.horvath_zeroshot_betas <- c(
+  cg02654291 = 0.4790076,
+  cg02972551 = 0.06577824,
+  cg09785172 = 0.07345546,
+  cg09869858 = 0.90873665,
+  cg13682722 = 0.08286815,
+  cg14329157 = 0.2129144,
+  cg16494477 = 0.10888695,
+  cg17408647 = 0.050788555,
+  cg19167673 = 0.12918185,
+  cg19273182 = 0.091691055,
+  cg19945840 = 0.4457802,
+  cg27319898 = 0.088073465,
+  cg04431054 = 0.24079,
+  cg05590257 = 0.07983112,
+  cg06117855 = 0.1637242,
+  cg19046959 = 0.08572849,
+  cg19569684 = 0.8127669,
+  cg24471894 = 0.1780318,
+  cg27016307 = 0.4206766
+)

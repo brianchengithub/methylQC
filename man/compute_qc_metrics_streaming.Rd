@@ -7,5 +7,11 @@
 compute_qc_metrics_streaming(basenames, platform, logger = NULL)
 }
 \description{
-Streaming QC metrics
+For each sample two SigDFs are derived: a pre-noob SigDF (prep code
+up to and including P) used for the QC statistics, sex chromosome
+intensities, and mean intensity; and a noob-corrected SigDF (full
+prep code) used only for the Horvath clock betas. Sex and intensity
+metrics intentionally use the non-noob signal (noob only subtracts
+background and cannot recover weak signal, so it offers no benefit
+for chromosome-presence calls).
 }

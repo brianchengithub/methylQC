@@ -7,6 +7,7 @@
 run_opensesame(
   basenames,
   platform,
+  prep_code = NULL,
   n_cores = NULL,
   collapse_to_pfx = NULL,
   collapse_method = NULL,
@@ -17,7 +18,9 @@ run_opensesame(
 \arguments{
 \item{basenames}{Character vector of IDAT basenames.}
 
-\item{platform}{Platform string (e.g., "EPIC").}
+\item{platform}{Platform string (e.g., "EPIC", "EPICv2", "HM450").}
+
+\item{prep_code}{SeSAMe prep code (default from options; "QCDPB").}
 
 \item{n_cores}{Number of cores (default 1 for streaming).}
 
@@ -30,15 +33,7 @@ run_opensesame(
 \item{logger}{Optional logger.}
 }
 \value{
-A list with:
-\describe{
-\item{betas}{Unmasked beta matrix (all probes, no NAs from masking)}
-\item{mvals}{Unmasked M-value matrix}
-\item{mask}{Logical matrix: TRUE = probe failed quality mask or
-detection p-value}
-\item{detP}{Detection p-value matrix (pOOBAH)}
-\item{sdfs}{List of SigDF objects (NULL if keep_sdfs = FALSE)}
-}
+A list with betas, mvals, mask, detP, and sdfs.
 }
 \description{
 Run openSesame and extract unmasked betas, mask, and detection p-values
