@@ -1,6 +1,5 @@
-# methylQC
+#methylQC
 
-<img src="man/figures/overview.svg" alt="methylQC overview" width="100%" />
 
 **QC and preprocessing pipeline for Illumina DNA methylation arrays.**
 
@@ -26,7 +25,7 @@ filtered analysis matrix, on the user's terms.
 - **Epigenetic age prediction** via the hardcoded Horvath (2013)
   clock (353 CpGs).
 - **SNP identity verification** via MDS on rs probes.
-- **Nine-page QC report PDF**: detection rate, probe-failure tail
+- **QC report PDF**: detection rate, probe-failure tail
   histogram, MDS, intensity, sample beta density, sex check, age
   check, and PCA plots.
 - **Cell-type deconvolution** (EpiDISH RPC) for blood-derived
