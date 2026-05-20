@@ -1,6 +1,130 @@
-# methylQC
+<img width="300" height="138" alt="overview" src="https://github.com/user-attachments/assets/56899910-3dc3-45fb-8c83-872d31097632" /># methylQC
+![Uploading <?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460" font-family="-apple-system, system-ui, sans-serif" role="img" aria-label="methylQC v2.0.0 pipeline overview diagram">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#444"/>
+    </marker>
+    <style>
+      .box       { fill: #ffffff; stroke: #444; stroke-width: 1.5; }
+      .box-in    { fill: #f5f5f5; stroke: #888; stroke-width: 1.5; }
+      .box-out   { fill: #fafafa; stroke: #444; stroke-width: 1.5; }
+      .box-user  { fill: #fffbe6; stroke: #b08800; stroke-width: 1.5; }
+      .stage     { font-size: 13px; font-weight: 700; fill: #222; letter-spacing: 0.5px; }
+      .title     { font-size: 14px; font-weight: 700; fill: #111; }
+      .body      { font-size: 11px; fill: #333; }
+      .mono      { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; fill: #06458c; }
+      .small     { font-size: 10px; fill: #555; }
+      .arrow     { stroke: #444; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+      .dash      { stroke: #b08800; stroke-width: 1.4; stroke-dasharray: 4 3; fill: none; marker-end: url(#arrow); }
+      .lane      { fill: none; stroke: #ddd; stroke-width: 1; stroke-dasharray: 2 4; }
+      .lane-lbl  { font-size: 11px; font-weight: 700; fill: #888; letter-spacing: 1px; }
+    </style>
+  </defs>
 
-<img src="man/figures/overview.svg" alt="methylQC overview" width="100%" />
+  <!-- Title -->
+  <text x="500" y="28" class="title" text-anchor="middle">methylQC v2.0.0 — two-stage pipeline</text>
+  <text x="500" y="44" class="small" text-anchor="middle">Raw matrices + masks. Flag, do not filter. Exclusion is explicit, via applymask().</text>
+
+  <!-- Lane dividers -->
+  <line x1="40"  y1="70" x2="40"  y2="420" class="lane"/>
+  <line x1="960" y1="70" x2="960" y2="420" class="lane"/>
+  <text x="60"  y="86" class="lane-lbl">INPUT</text>
+  <text x="305" y="86" class="lane-lbl">STAGE 1 · qc()</text>
+  <text x="600" y="86" class="lane-lbl">STAGE 2 · prep() / prepcell()</text>
+  <text x="845" y="86" class="lane-lbl">USER</text>
+
+  <!-- Input box -->
+  <rect x="60"  y="120" width="160" height="80" rx="4" class="box-in"/>
+  <text x="140" y="142" class="title" text-anchor="middle">IDATs</text>
+  <text x="140" y="162" class="body" text-anchor="middle">paired _Grn / _Red</text>
+  <text x="140" y="180" class="body" text-anchor="middle">sample sheet (csv/txt)</text>
+
+  <!-- Stage 1 box -->
+  <rect x="250" y="105" width="280" height="190" rx="4" class="box"/>
+  <text x="390" y="124" class="stage" text-anchor="middle">QCDP + B</text>
+  <text x="390" y="142" class="small" text-anchor="middle">Quality mask → NOOB → Dye-bias → pOOBAH</text>
+  <text x="390" y="158" class="small" text-anchor="middle">then getBetas(mask = FALSE)</text>
+
+  <line x1="265" y1="172" x2="515" y2="172" stroke="#ddd"/>
+
+  <text x="265" y="192" class="mono">discover()</text>
+  <text x="265" y="210" class="mono">runsesame()</text>
+  <text x="265" y="228" class="mono">snpbetas()</text>
+  <text x="265" y="246" class="mono">qcmetrics() | qcstream()</text>
+  <text x="265" y="264" class="mono">checkmeta()</text>
+  <text x="265" y="282" class="small">streaming · one IDAT pair at a time</text>
+
+  <!-- Stage 1 outputs -->
+  <rect x="555" y="120" width="180" height="170" rx="4" class="box-out"/>
+  <text x="645" y="138" class="stage" text-anchor="middle">RAW OUTPUTS</text>
+  <text x="565" y="158" class="mono">betas_all.rds</text>
+  <text x="565" y="174" class="mono">mvals_all.rds</text>
+  <text x="565" y="190" class="mono">mask_all.rds</text>
+  <text x="565" y="206" class="mono">detP_all.rds</text>
+  <text x="565" y="222" class="mono">snp_betas.rds</text>
+  <text x="565" y="238" class="mono">sample_sheet.csv</text>
+  <text x="565" y="254" class="mono">metadata.rds</text>
+  <text x="645" y="278" class="small" text-anchor="middle">no NAs from masking</text>
+
+  <!-- Arrow input -> Stage 1 -->
+  <path d="M222,160 L248,160" class="arrow"/>
+
+  <!-- Arrow Stage 1 -> Stage 1 outputs -->
+  <path d="M532,200 L553,200" class="arrow"/>
+
+  <!-- Stage 2 box -->
+  <rect x="250" y="315" width="280" height="105" rx="4" class="box"/>
+  <text x="390" y="334" class="stage" text-anchor="middle">FLAG · REPORT · DECONVOLVE</text>
+  <text x="265" y="354" class="mono">qcflags()       (internal, no CSV)</text>
+  <text x="265" y="370" class="mono">qcreport()      9-page PDF</text>
+  <text x="265" y="386" class="mono">rundish()       (blood only)</text>
+  <text x="265" y="402" class="small">no auto-exclusion · flags for plot colouring only</text>
+
+  <!-- Arrow Stage 1 outputs -> Stage 2 -->
+  <path d="M645,290 L645,302 L530,302 L530,360" class="arrow"/>
+
+  <!-- Stage 2 outputs -->
+  <rect x="555" y="315" width="180" height="105" rx="4" class="box-out"/>
+  <text x="645" y="333" class="stage" text-anchor="middle">REPORT OUTPUTS</text>
+  <text x="565" y="353" class="mono">qc_plots.pdf</text>
+  <text x="565" y="369" class="mono">pc_scores.csv</text>
+  <text x="565" y="385" class="mono">failed_probes.csv</text>
+  <text x="565" y="401" class="mono">sample_sheet.csv (Stage 2)</text>
+
+  <!-- Arrow Stage 2 -> Stage 2 outputs -->
+  <path d="M532,370 L553,370" class="arrow"/>
+
+  <!-- User column -->
+  <rect x="770" y="120" width="180" height="100" rx="4" class="box-user"/>
+  <text x="860" y="140" class="stage" text-anchor="middle">USER FILTERING</text>
+  <text x="780" y="160" class="mono">applymask(</text>
+  <text x="780" y="174" class="mono">  betas, mask, detP,</text>
+  <text x="780" y="188" class="mono">  exclude  = bad_ids,</text>
+  <text x="780" y="202" class="mono">  probes   = "cg",</text>
+  <text x="780" y="216" class="mono">  impute   = TRUE)</text>
+
+  <!-- User opt-in -->
+  <rect x="770" y="240" width="180" height="65" rx="4" class="box-user"/>
+  <text x="860" y="259" class="stage" text-anchor="middle">OPT-IN UTILITIES</text>
+  <text x="780" y="279" class="mono">flagsamples()</text>
+  <text x="780" y="295" class="mono">snpcheck()</text>
+
+  <!-- User analysis matrix -->
+  <rect x="770" y="325" width="180" height="60" rx="4" class="box-user"/>
+  <text x="860" y="345" class="stage" text-anchor="middle">ANALYSIS MATRIX</text>
+  <text x="860" y="365" class="body" text-anchor="middle">filtered, optionally</text>
+  <text x="860" y="379" class="body" text-anchor="middle">imputed</text>
+
+  <!-- Arrow Stage 1 outputs -> applymask (dashed: user-driven) -->
+  <path d="M736,170 L768,170" class="dash"/>
+  <!-- Arrow Stage 2 outputs -> opt-in utilities (dashed) -->
+  <path d="M736,270 L768,270" class="dash"/>
+  <!-- Arrow applymask -> analysis -->
+  <path d="M860,222 L860,323" class="arrow"/>
+</svg>
+overview.svg…]()
+
 
 **QC and preprocessing pipeline for Illumina DNA methylation arrays.**
 
@@ -14,11 +138,6 @@ mask and detection p-values; nothing is excluded automatically.
 `applymask()` is the single function that turns those matrices into a
 filtered analysis matrix, on the user's terms.
 
-> **v2.0.0 is a breaking release.** See `METHODS.md` §0 for the full
-> rename map. The behavioural change is bigger than the rename: there
-> are no longer any auto-generated exclusion CSVs. The pipeline flags;
-> the user filters.
-
 ## Features
 
 - **Streaming preprocessing** through SeSAMe `openSesame` (one IDAT
@@ -31,9 +150,9 @@ filtered analysis matrix, on the user's terms.
 - **Epigenetic age prediction** via the hardcoded Horvath (2013)
   clock (353 CpGs).
 - **SNP identity verification** via MDS on rs probes.
-- **Nine-page QC report PDF**: detection rate, probe-failure tail
+- **QC report PDF**: detection rate, probe-failure tail
   histogram, MDS, intensity, sample beta density, sex check, age
-  check, scree, and a 2×3 panel of PC-vs-associated-variable plots.
+  check, and PCA plots.
 - **Cell-type deconvolution** (EpiDISH RPC) for blood-derived
   tissues.
 - **`applymask()`** — single filtering primitive with optional
