@@ -14,11 +14,6 @@ mask and detection p-values; nothing is excluded automatically.
 `applymask()` is the single function that turns those matrices into a
 filtered analysis matrix, on the user's terms.
 
-> **v2.0.0 is a breaking release.** See `METHODS.md` §0 for the full
-> rename map. The behavioural change is bigger than the rename: there
-> are no longer any auto-generated exclusion CSVs. The pipeline flags;
-> the user filters.
-
 ## Features
 
 - **Streaming preprocessing** through SeSAMe `openSesame` (one IDAT
@@ -33,7 +28,7 @@ filtered analysis matrix, on the user's terms.
 - **SNP identity verification** via MDS on rs probes.
 - **Nine-page QC report PDF**: detection rate, probe-failure tail
   histogram, MDS, intensity, sample beta density, sex check, age
-  check, scree, and a 2×3 panel of PC-vs-associated-variable plots.
+  check, and PCA plots.
 - **Cell-type deconvolution** (EpiDISH RPC) for blood-derived
   tissues.
 - **`applymask()`** — single filtering primitive with optional
