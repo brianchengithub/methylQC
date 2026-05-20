@@ -54,6 +54,8 @@ API rename map for the user-facing surface:
 | `run_opensesame`                  | `runsesame`     |
 | `write_qc_report`                 | `qcreport`      |
 | (new)                             | `flagsamples`   |
+| (new)                             | `checkdeps`     |
+| (new)                             | `liftv2`        |
 
 ---
 
@@ -613,7 +615,129 @@ snpcheck(rsbetas,
 
 ---
 
-## 7. Design rationale
+## 7. EPICv2 replicate collapse and probe lift-over: `liftv2()`
+
+EPICv2 manifests target many CpGs with multiple replicate probes
+(`cg`/`ch` probe IDs sharing a stem but differing by suffix). For
+cohort analyses every sample must use the **same physical probe** for
+a given CpG, otherwise replicate-choice variation enters the analysis
+as technical noise. `liftv2()` resolves this cohort-consistently and
+then lifts the surviving probe IDs to a legacy platform (EPIC or
+HM450) via SeSAMe's `mLiftOver`.
+
+### 7.1 Algorithm
+
+For each CpG with replicate probes:
+
+1. Strip the EPICv2 suffix to build a CpG-level key
+   (`sub("_.*$", "", probe_id)`).
+2. Compute each probe's cross-sample detection failure rate
+   (`rowMeans(detP > pthresh)`); probes with all-NA detection are
+   treated as worst.
+3. Keep the probe with the lowest failure rate. Ties resolve to the
+   first probe by ID order. This is a **cohort-level** decision; it
+   selects the same physical probe for every sample, unlike SeSAMe's
+   `collapseToPfx(method = "minPvalue")` which picks per-sample.
+4. After de-duplication, call `sesame::mLiftOver(mat, platform,
+   impute = FALSE)` to lift IDs to the target platform.
+
+`rs` (SNP) probes and control probes are not touched.
+
+### 7.2 Signature
+
+```r
+liftv2(mat      = NULL,         # numeric matrix, EPICv2 probes x samples
+       detP     = NULL,         # detection p-value matrix (required)
+       matpath  = NULL,         # alternative to mat: path to .rds
+       detppath = NULL,         # alternative to detP: path to .rds
+       platform = c("EPIC", "HM450"),
+       pthresh  = NULL,         # default mqcopts()$detp (0.05)
+       dedupcsv = NULL,         # optional per-CpG kept/dropped log
+       details  = FALSE,
+       logger   = NULL)
+```
+
+If `details = FALSE` (default), returns the de-duplicated, lifted
+matrix. If `details = TRUE`, returns a list with `mat`, `kept_ids`
+(surviving EPICv2 IDs), `id_map` (named character vector: EPICv2 ID
+→ harmonised ID), and `platform`. The detail list is what you need
+to re-align companion matrices (mask, detP) with the internal helper
+`apply_epicv2_map(companion, kept_ids, id_map)` so all matrices stay
+consistent.
+
+### 7.3 Typical workflow
+
+```r
+# Stage 1 has already produced betas_all.rds and detP_all.rds on EPICv2.
+lifted <- liftv2(
+  matpath  = "results/betas_all.rds",
+  detppath = "results/detP_all.rds",
+  platform = "EPIC",
+  dedupcsv = "results/epicv2_dedup_log.csv",
+  details  = TRUE)
+
+# Lift the companion matrices through the same kept_ids + id_map
+mask    <- readRDS("results/mask_all.rds")
+detP    <- readRDS("results/detP_all.rds")
+mask_lifted <- methylQC:::apply_epicv2_map(mask, lifted$kept_ids,
+                                           lifted$id_map, fill = FALSE)
+detP_lifted <- methylQC:::apply_epicv2_map(detP, lifted$kept_ids,
+                                           lifted$id_map, fill = NA_real_)
+
+# Now hand to applymask() exactly like any non-v2 cohort
+betas_clean <- applymask(
+  lifted$mat, mask = mask_lifted, detP = detP_lifted,
+  probes = "cg", platform = "EPIC")
+```
+
+### 7.4 When NOT to use `liftv2()`
+
+- Single-platform analyses where every sample is on EPICv2 and you
+  don't need cross-platform comparability. Use SeSAMe's
+  `collapseToPfx` (set `mqcset(collapse = TRUE)`) or skip collapse
+  entirely.
+- Cohorts already collapsed by SeSAMe's per-sample method. `liftv2()`
+  expects the matrix to still contain replicate suffixes.
+
+---
+
+## 8. Environment verification: `checkdeps()`
+
+`checkdeps(quiet = FALSE)` is a standalone diagnostic. It does **not**
+install or update anything; it verifies that the runtime is correctly
+provisioned and prints the exact install command for anything missing
+or stale.
+
+What it checks:
+
+- **R version.** Must be ≥ 4.1.0.
+- **Required Bioconductor / CRAN packages and minimum versions** —
+  baked into the internal `.methylqc_min_versions` list:
+
+  | Package      | Minimum version |
+  |--------------|-----------------|
+  | sesame       | 1.20.0          |
+  | sesameData   | 1.20.0          |
+  | EpiDISH      | 2.18.0          |
+  | ggplot2      | 3.4.0           |
+  | matrixStats  | 0.62.0          |
+
+- **SeSAMe data cache** — calls
+  `sesameData::sesameDataGet("genomeInfo.hg38")` as a tracer; failure
+  means the cache is not initialised. Fix:
+  `sesameData::sesameDataCacheAll()`.
+- **EpiDISH reference panel** — checks that `mqcopts()$dishref`
+  (default `"centDHSbloodDMC.m"`) is loadable from the installed
+  EpiDISH.
+
+Return value: invisibly, `list(ok = <logical>, problems = <character>)`.
+Run on a fresh box before the first pipeline run; the printed report
+plus the install commands give you a deterministic provisioning
+checklist.
+
+---
+
+## 9. Design rationale
 
 **Raw matrices + separate masks.** Signal and QC are decoupled.
 Different downstream analyses need different masks; baking them into
@@ -679,7 +803,7 @@ matters more than typing speed.
 
 ---
 
-## 8. References
+## 10. References
 
 1. Zhou W, Triche TJ, Laird PW, Shen H. *SeSAMe: reducing artifactual
    detection of DNA methylation by Infinium BeadChips in genomic
