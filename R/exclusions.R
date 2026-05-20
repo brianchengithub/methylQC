@@ -1,158 +1,153 @@
-#' Build sample exclusion table from QC metrics
-#'
-#' Uses SeSAMe's \code{frac_dt} as the call-rate metric. Resolves the
-#' sex column via flexible alias matching, and normalizes sex encodings
-#' to M/F before comparing.
-#'
-#' @param sample_sheet_full Sample sheet merged with QC metrics.
-#' @param logger Optional logger.
-#' @return A \code{data.frame} with columns sample_id, frac_dt,
-#'   frac_usable, reason.
-#' @export
-build_sample_exclusions <- function(sample_sheet_full, logger = NULL) {
-  cfg <- methylQC_options()
-  cols <- colnames(sample_sheet_full)
+###############################################################################
+# exclusions.R — Sample flagging, SNP probe extraction, sex-probe lookup
+#
+# methylQC NEVER removes samples or probes automatically. This file holds:
+#
+#   qcflags()     — internal. Per-sample low-detection / low-intensity flags
+#                   used ONLY to colour QC-report plots. Writes no file and
+#                   feeds no exclusion list.
+#   flagsamples() — exported. A standalone utility: given a detection p-value
+#                   matrix and a call-rate threshold, writes a CSV listing
+#                   samples below the threshold. Advisory only — the user
+#                   decides whether to feed those IDs to applymask(exclude=).
+#   snpbetas()    — exported. Extracts the rs (SNP) probe sub-matrix.
+#   sexprobes()   — internal. Sex-chromosome probe IDs from the manifest.
+#
+# There is no probe-exclusion table and no exclude_probes.csv. Probe-level
+# masking is carried entirely by the mask and detP matrices (see applymask()).
+###############################################################################
 
-  sex_col <- resolve_column(cols, cfg$reported_sex_col,
-                            cfg$reported_sex_aliases)
-  has_sex_check <- !is.na(sex_col) && "inferred_sex" %in% cols
+#' Per-sample QC flags for plot colouring (internal)
+#'
+#' Produces low-detection and low-intensity flags from the merged sample
+#' sheet. Used only to colour the detection-rate and intensity QC plots.
+#' Sex mismatches and age outliers are deliberately NOT flagged here —
+#' they are computed by, and belong to, their own QC-report pages.
+#'
+#' This function writes nothing to disk and produces no exclusion list.
+#'
+#' @param ss Sample sheet merged with QC metrics.
+#' @param logger Optional logger.
+#' @return A \code{data.frame} (one row per flagged sample) with columns
+#'   sample_id, frac_dt, frac_usable, reason. Empty if nothing is flagged.
+#' @keywords internal
+#' @noRd
+qcflags <- function(ss, logger = NULL) {
+  cfg  <- mqcopts()
+  cols <- colnames(ss)
+
   has_intensity <- "mean_intensity" %in% cols
   has_frac_dt   <- "frac_dt" %in% cols
   has_batch     <- "batch_folder" %in% cols
 
   if (!has_frac_dt) {
     stop("Sample sheet does not contain `frac_dt` column. ",
-         "Did you forget to merge in compute_qc_metrics() output?")
+         "Did you forget to merge in qcmetrics() output?")
   }
 
-  if (has_sex_check && !is.null(logger)) {
-    logger$log("excl_samples",
-               sprintf("resolved sex column: '%s'", sex_col))
-  }
-
-  normalized_reported_sex <- if (has_sex_check) {
-    normalize_sex(sample_sheet_full[[sex_col]], col_name = sex_col)
-  } else NULL
-  normalized_inferred_sex <- if (has_sex_check) {
-    normalize_sex(sample_sheet_full$inferred_sex, col_name = "inferred_sex")
-  } else NULL
-
-  reasons <- vapply(seq_len(nrow(sample_sheet_full)), function(i) {
-    row <- sample_sheet_full[i, , drop = FALSE]
+  reasons <- vapply(seq_len(nrow(ss)), function(i) {
+    row <- ss[i, , drop = FALSE]
     parts <- character(0)
-    if (!is.na(row$frac_dt) && row$frac_dt < cfg$sample_call_min) {
+    if (!is.na(row$frac_dt) && row$frac_dt < cfg$samplemin) {
       parts <- c(parts, sprintf("low_detection(%.3f)", row$frac_dt))
     }
     if (has_intensity && !is.na(row$mean_intensity) &&
-        row$mean_intensity < cfg$intensity_min) {
+        row$mean_intensity < cfg$intmin) {
       parts <- c(parts, sprintf("low_intensity(%.0f)", row$mean_intensity))
-    }
-    if (has_sex_check) {
-      rep_sex <- normalized_reported_sex[i]
-      inf_sex <- normalized_inferred_sex[i]
-      if (!is.na(rep_sex) && !is.na(inf_sex) && rep_sex != inf_sex) {
-        parts <- c(parts, sprintf("sex_mismatch(%s/%s)",
-                                  as.character(row[[sex_col]]),
-                                  as.character(row$inferred_sex)))
-      }
     }
     paste(parts, collapse = ";")
   }, character(1))
 
   base_cols <- list(
-    sample_id   = sample_sheet_full$sample_id,
-    frac_dt     = sample_sheet_full$frac_dt,
-    frac_usable = sample_sheet_full$frac_usable,
+    sample_id   = ss$sample_id,
+    frac_dt     = ss$frac_dt,
+    frac_usable = ss$frac_usable,
     reason      = reasons
   )
   if (has_batch) {
     base_cols <- c(
-      list(sample_id = sample_sheet_full$sample_id,
-           batch_folder = sample_sheet_full$batch_folder),
+      list(sample_id = ss$sample_id, batch_folder = ss$batch_folder),
       base_cols[-1]
     )
   }
-  excl <- do.call(data.frame, c(base_cols, stringsAsFactors = FALSE))
-  excl <- excl[nchar(excl$reason) > 0, ]
+  flags <- do.call(data.frame, c(base_cols, stringsAsFactors = FALSE))
+  flags <- flags[nchar(flags$reason) > 0, ]
 
   if (!is.null(logger)) {
-    logger$log("excl_samples",
-               sprintf("flagged %d / %d (%.1f%%)",
-                       nrow(excl), nrow(sample_sheet_full),
-                       100 * nrow(excl) / nrow(sample_sheet_full)))
+    logger$log("qcflags",
+               sprintf("flagged %d / %d (%.1f%%) for low detection/intensity",
+                       nrow(flags), nrow(ss),
+                       100 * nrow(flags) / max(nrow(ss), 1)))
   }
-  excl
+  flags
 }
 
-#' Build probe exclusion table
+#' Flag samples by detection call rate
 #'
-#' Flags probes for exclusion: low call rate, sex chromosomes (chrX/chrY),
-#' SNP/rs probes, and any other non-cg/ch probes. Only probes starting
-#' with "cg" or "ch" survive into downstream matrices.
+#' A standalone, opt-in utility. Computes each sample's call rate from a
+#' detection p-value matrix (fraction of probes with \code{detP <= pthresh})
+#' and writes a CSV of every sample whose call rate falls below
+#' \code{callrate}.
 #'
-#' @param betas Beta matrix.
-#' @param platform Platform string.
+#' This function performs NO automatic exclusion. It only produces a list.
+#' To act on it, the user passes the IDs themselves to
+#' \code{\link{applymask}(exclude = ...)} — either the returned vector or a
+#' CSV they assemble. \code{flagsamples()} does not accept hand-picked IDs;
+#' it flags purely on the call-rate threshold.
+#'
+#' @param detP Numeric detection p-value matrix (probes x samples), e.g.
+#'   \code{readRDS("detP_all.rds")}.
+#' @param callrate Minimum acceptable call rate. Samples below this are
+#'   flagged. Default: the \code{samplemin} option (0.95).
+#' @param pthresh Detection p-value cutoff; a probe is counted as detected
+#'   when \code{detP <= pthresh}. Default: the \code{detp} option (0.05).
+#' @param csv Output CSV path. Default \code{"flagged_samples.csv"}.
 #' @param logger Optional logger.
-#' @return A data.frame of excluded probes. Has attribute "all_probe_rates".
+#' @return Invisibly, a data.frame of ALL samples with columns sample_id,
+#'   call_rate, and flagged (logical). The CSV contains only flagged rows.
+#' @examples
+#' \dontrun{
+#' detP <- readRDS("results/detP_all.rds")
+#' flagged <- flagsamples(detP, callrate = 0.95,
+#'                        csv = "results/flagged_samples.csv")
+#' bad_ids <- flagged$sample_id[flagged$flagged]
+#'
+#' betas <- readRDS("results/betas_all.rds")
+#' mask  <- readRDS("results/mask_all.rds")
+#' betas_clean <- applymask(betas, mask = mask, detP = detP,
+#'                          exclude = bad_ids, platform = "EPIC")
+#' }
 #' @export
-build_probe_exclusions <- function(betas, platform, logger = NULL) {
-  cfg <- methylQC_options()
+flagsamples <- function(detP, callrate = NULL, pthresh = NULL,
+                        csv = "flagged_samples.csv", logger = NULL) {
+  stopifnot(is.matrix(detP) && is.numeric(detP))
+  cfg      <- mqcopts()
+  callrate <- if (is.null(callrate)) cfg$samplemin else callrate
+  pthresh  <- if (is.null(pthresh))  cfg$detp      else pthresh
 
-  pct_failed <- rowMeans(is.na(betas)) * 100
-  call_rate  <- 1 - pct_failed / 100
+  call_rate <- colMeans(detP <= pthresh, na.rm = TRUE)
+  sample_id <- colnames(detP)
+  if (is.null(sample_id)) sample_id <- as.character(seq_along(call_rate))
 
-  sex_probes <- get_sex_probes(platform)
-  is_sex <- rownames(betas) %in% sex_probes
-  is_low <- call_rate < cfg$probe_call_min
-  is_snp <- grepl("^rs", rownames(betas))
-  is_non_cg_ch <- !grepl("^(cg|ch)", rownames(betas))
+  out <- data.frame(sample_id = sample_id,
+                    call_rate = call_rate,
+                    flagged   = call_rate < callrate,
+                    stringsAsFactors = FALSE)
+  flagged <- out[out$flagged, c("sample_id", "call_rate"), drop = FALSE]
 
-  reason <- vapply(seq_len(nrow(betas)), function(i) {
-    parts <- character(0)
-    if (is_low[i])      parts <- c(parts, sprintf("low_call_rate(%.3f)", call_rate[i]))
-    if (is_sex[i])      parts <- c(parts, "sex_chrom")
-    if (is_snp[i])      parts <- c(parts, "snp_probe")
-    if (is_non_cg_ch[i] && !is_snp[i]) parts <- c(parts, "non_cg_ch_probe")
-    paste(parts, collapse = ";")
-  }, character(1))
-
-  all_rates <- data.frame(
-    probe_id           = rownames(betas),
-    pct_samples_failed = pct_failed,
-    stringsAsFactors   = FALSE
-  )
-
-  excl <- data.frame(
-    probe_id  = rownames(betas),
-    call_rate = call_rate,
-    is_sex    = is_sex,
-    is_snp    = is_snp,
-    reason    = reason,
-    stringsAsFactors = FALSE
-  )
-  attr(excl, "all_probe_rates") <- all_rates
-
-  # Attach probe-type counts for the QC summary
-  n_total <- nrow(betas)
-  n_cg    <- sum(grepl("^cg", rownames(betas)))
-  n_ch    <- sum(grepl("^ch", rownames(betas)))
-  n_rs    <- sum(is_snp)
-  n_sex   <- sum(is_sex)
-  n_other <- sum(is_non_cg_ch & !is_snp)
-  n_low   <- sum(is_low)
-  attr(excl, "probe_counts") <- list(
-    n_total = n_total, n_cg = n_cg, n_ch = n_ch,
-    n_rs = n_rs, n_sex = n_sex, n_other = n_other, n_low_call = n_low
-  )
-
-  excl <- excl[nchar(excl$reason) > 0, ]
-
-  if (!is.null(logger)) {
-    logger$log("excl_probes",
-               sprintf("flagged %d (low_call=%d, sex=%d, snp=%d, other_non_cg_ch=%d)",
-                       nrow(excl), n_low, n_sex, n_rs, n_other))
+  if (!is.null(csv)) {
+    utils::write.csv(flagged, csv, row.names = FALSE)
   }
-  excl
+  if (!is.null(logger)) {
+    logger$log("flagsamples",
+               sprintf("call rate < %.3f: %d / %d sample(s); wrote %s",
+                       callrate, nrow(flagged), nrow(out),
+                       if (is.null(csv)) "(no file)" else csv))
+  }
+  message(sprintf(
+    "flagsamples(): %d / %d sample(s) below call rate %.3f. No samples removed.",
+    nrow(flagged), nrow(out), callrate))
+  invisible(out)
 }
 
 #' Extract the rs (SNP) probe matrix from a beta matrix
@@ -164,15 +159,15 @@ build_probe_exclusions <- function(betas, platform, logger = NULL) {
 #' @param logger Optional logger.
 #' @return Numeric matrix (samples x rs probes), or NULL if none found.
 #' @export
-extract_snp_betas <- function(betas, logger = NULL) {
+snpbetas <- function(betas, logger = NULL) {
   rs_probes <- grep("^rs", rownames(betas), value = TRUE)
   if (length(rs_probes) == 0) {
-    if (!is.null(logger)) logger$log("snp_probes", "no rs probes found")
+    if (!is.null(logger)) logger$log("snpbetas", "no rs probes found")
     return(NULL)
   }
   rs_mat <- t(betas[rs_probes, , drop = FALSE])
   if (!is.null(logger)) {
-    logger$log("snp_probes",
+    logger$log("snpbetas",
                sprintf("extracted %d rs probes x %d samples",
                        ncol(rs_mat), nrow(rs_mat)))
   }
@@ -182,7 +177,7 @@ extract_snp_betas <- function(betas, logger = NULL) {
 #' Load sex-chromosome probe IDs from the platform manifest
 #' @keywords internal
 #' @noRd
-get_sex_probes <- function(platform) {
+sexprobes <- function(platform) {
   tryCatch({
     mft <- sesameData::sesameDataGet(paste0(platform, ".address"))
     if (!is.null(mft$hg38)) {

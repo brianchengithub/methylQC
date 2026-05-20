@@ -3,106 +3,93 @@
 #
 # All tunable parameters stored as R options with prefix "methylQC.".
 # Column names are configurable with case-insensitive alias matching.
+#
+# Option keys are short, separator-free identifiers (see mqcdefaults()).
 ###############################################################################
 
 #' Default configuration for methylQC
+#'
+#' Returns the full set of tunable options. Option keys are short,
+#' separator-free identifiers. Override globally with [mqcset()] or
+#' temporarily by passing named arguments to most pipeline functions.
+#'
 #' @return A named list of defaults.
 #' @export
-methylQC_defaults <- function() {
+mqcdefaults <- function() {
   list(
     # ---- Sample sheet discovery ----
-    sample_sheet_pattern = "sample.*\\.(csv|tsv|txt)$",
-    basename_col         = "Basename",
+    sheetpattern = "sample.*\\.(csv|tsv|txt)$",
+    basecol      = "Basename",
 
     # ---- Key column names (user-configurable with aliases) ----
-    sample_id_col        = "sample_id",
-    sample_id_aliases    = c("sample_id", "Sample_ID", "SampleID",
-                             "Sample_Name", "Sample", "sample_name"),
-    donor_col            = "Donor",
-    donor_aliases        = c("Donor", "donor", "Subject", "subject",
-                             "Participant", "participant", "SubjectID",
-                             "DonorID", "ID", "donor_id", "subject_id"),
-    reported_sex_col     = "Reported_Sex",
-    reported_sex_aliases = c("Reported_Sex", "Sex", "gender", "Gender",
-                             "Female", "Male", "reported_sex", "sex"),
-    reported_age_col     = "Age",
-    reported_age_aliases = c("Age", "age", "age_years", "AgeYears",
-                             "age_at_sample", "reported_age"),
-    batch_col            = "batch_folder",
-    batch_aliases        = c("batch_folder", "Batch", "batch", "Plate",
-                             "plate", "Slide", "slide", "Chip", "chip",
-                             "Array_Plate", "SentrixBarcode_A"),
-    cell_col             = "Cell",
-    cell_aliases         = c("Cell", "cell", "Cell_Type", "cell_type",
-                             "CellType", "Tissue", "tissue",
-                             "Tissue_Type", "tissue_type",
-                             "Sample_Type", "sample_type",
-                             "SampleType", "Source", "source"),
+    idcol        = "sample_id",
+    idaliases    = c("sample_id", "Sample_ID", "SampleID",
+                     "Sample_Name", "Sample", "sample_name"),
+    donorcol     = "Donor",
+    donoraliases = c("Donor", "donor", "Subject", "subject",
+                     "Participant", "participant", "SubjectID",
+                     "DonorID", "ID", "donor_id", "subject_id"),
+    sexcol       = "Reported_Sex",
+    sexaliases   = c("Reported_Sex", "Sex", "gender", "Gender",
+                     "Female", "Male", "reported_sex", "sex"),
+    agecol       = "Age",
+    agealiases   = c("Age", "age", "age_years", "AgeYears",
+                     "age_at_sample", "reported_age"),
+    batchcol     = "batch_folder",
+    batchaliases = c("batch_folder", "Batch", "batch", "Plate",
+                     "plate", "Slide", "slide", "Chip", "chip",
+                     "Array_Plate", "SentrixBarcode_A"),
+    cellcol      = "Cell",
+    cellaliases  = c("Cell", "cell", "Cell_Type", "cell_type",
+                     "CellType", "Tissue", "tissue",
+                     "Tissue_Type", "tissue_type",
+                     "Sample_Type", "sample_type",
+                     "SampleType", "Source", "source"),
 
     # ---- Processing ----
-    n_cores   = 1L,
-    save_sdfs = TRUE,
-
-    # ---- SeSAMe preprocessing ----
-    # prep code passed to openSesame. "QCDPB" = Quality mask, Channel
-    # inference, Dye-bias correction, detection P-values (pOOBAH), and
-    # noob Background correction. pOOBAH (P) runs BEFORE noob (B), so
-    # detection p-values are computed on non-noob signal, while the
-    # output betas/M-values are noob-corrected.
-    prep_code = "QCDPB",
+    cores   = 1L,
+    savesdf = FALSE,
 
     # ---- QC thresholds ----
-    detP_thresh     = 0.05,
-    sample_call_min = 0.95,
-    probe_call_min  = 0.95,
-    intensity_min   = 1300,
+    # detp      : detection p-value cutoff. A probe PASSES at detP <= detp.
+    # samplemin : minimum per-sample call rate (frac_dt) before low-detection flag.
+    # intmin    : minimum per-sample mean intensity before low-intensity flag.
+    # probemin  : per-probe pass-rate used ONLY for the console "Probe breakdown"
+    #             summary. It is informational and drives no file or exclusion.
+    # failmin   : per-probe sample-FAILURE fraction at/above which a probe enters
+    #             the QC-report probe-failure tail plot and the exported CSV.
+    detp      = 0.05,
+    samplemin = 0.95,
+    intmin    = 1300,
+    probemin  = 0.95,
+    failmin   = 0.95,
+
+    # inclqual : if TRUE, quality-masked probes are kept in the probe-failure
+    #            tail plot/CSV. Default FALSE excludes them (they fail by design).
+    inclqual  = FALSE,
 
     # ---- QC plots ----
-    # Number of most-variable probes used for MDS and PCA
-    n_top_variable = 100000L,
-
-    # ---- k-NN imputation (apply_mask) ----
-    # Imputation uses the top knn_var_probes most-variable probes to
-    # compute sample-to-sample Euclidean distance, then imputes each
-    # missing value as the inverse-distance-weighted mean of the
-    # knn_k nearest neighbours.
-    knn_k          = 50L,
-    knn_var_probes = 30000L,
+    # ntop : number of most-variable probes used for PCA (MDS uses all probes).
+    ntop = 100000L,
 
     # ---- EpiDISH ----
-    # Default reference is the 12 immune cell-type panel (cent12CT.m),
-    # used as a purity check for both whole blood and isolated/sorted
-    # blood cell populations.
-    epidish_reference  = "cent12CT.m",
-    epidish_method     = "RPC",
-    epidish_cell_types = c("PBMC", "WB", "WBC", "buffy", "buffy coat",
-                           "whole blood", "blood",
-                           "CD4CM", "CD4EM", "CD4N", "CD8CM", "CD8EM",
-                           "CD8N", "BN", "BM", "NK", "Mono", "Granulo",
-                           "B", "B cell", "T cell", "monocyte",
-                           "granulocyte", "neutrophil", "eosinophil",
-                           "basophil", "lymphocyte", "leukocyte"),
+    dishref    = "centDHSbloodDMC.m",
+    dishmethod = "RPC",
+    bloodtypes = c("PBMC", "WB", "WBC", "buffy", "buffy coat",
+                   "whole blood", "blood"),
 
-    # ---- SeSAMe replicate probe collapsing (legacy openSesame path) ----
-    collapse_to_pfx = FALSE,
-    collapse_method = "mean",
-
-    # ---- EPICv2 de-duplication + probe ID harmonization ----
-    # When TRUE: for EPICv2 data, replicate probes (sharing a cg/ch
-    # prefix) are de-duplicated by selecting the probe with the fewest
-    # cross-sample detection failures (ties -> first probe), then probe
-    # IDs are harmonized to the target platform via sesameData mappings.
-    epicv2_harmonize = FALSE,
-    epicv2_target    = "EPIC"
+    # ---- SeSAMe ----
+    collapse       = FALSE,
+    collapsemethod = "mean"
   )
 }
 
 #' Get current methylQC configuration
-#' @param ... Named overrides to apply temporarily.
+#' @param ... Named overrides to apply temporarily to the returned list.
 #' @return A named list of all current options.
 #' @export
-methylQC_options <- function(...) {
-  defaults <- methylQC_defaults()
+mqcopts <- function(...) {
+  defaults <- mqcdefaults()
   current <- lapply(names(defaults), function(k) {
     getOption(paste0("methylQC.", k), defaults[[k]])
   })
@@ -113,16 +100,16 @@ methylQC_options <- function(...) {
 }
 
 #' Set methylQC options globally
-#' @param ... Named options (e.g., \code{donor_col = "SubjectID"}).
+#' @param ... Named options (e.g., \code{donorcol = "SubjectID"}).
 #' @return Invisibly, the previous values.
 #' @export
-methylQC_set <- function(...) {
+mqcset <- function(...) {
   overrides <- list(...)
   if (length(overrides) == 0) return(invisible(list()))
   if (is.null(names(overrides)) || any(names(overrides) == "")) {
-    stop("All arguments to methylQC_set() must be named.", call. = FALSE)
+    stop("All arguments to mqcset() must be named.", call. = FALSE)
   }
-  valid <- names(methylQC_defaults())
+  valid <- names(mqcdefaults())
   unknown <- setdiff(names(overrides), valid)
   if (length(unknown)) {
     warning("Unknown methylQC options: ", paste(unknown, collapse = ", "),
@@ -136,9 +123,10 @@ methylQC_set <- function(...) {
 }
 
 #' Reset all methylQC options to defaults
+#' @return Invisibly NULL.
 #' @export
-methylQC_reset <- function() {
-  defaults <- methylQC_defaults()
+mqcreset <- function() {
+  defaults <- mqcdefaults()
   prefixed <- stats::setNames(vector("list", length(defaults)),
                               paste0("methylQC.", names(defaults)))
   do.call(options, prefixed)
@@ -178,18 +166,11 @@ normalize_sex <- function(x, col_name = "") {
 }
 
 .onLoad <- function(libname, pkgname) {
-  defaults <- methylQC_defaults()
+  defaults <- mqcdefaults()
   for (k in names(defaults)) {
     opt_name <- paste0("methylQC.", k)
     if (is.null(getOption(opt_name))) {
       do.call(options, stats::setNames(list(defaults[[k]]), opt_name))
     }
   }
-}
-
-.onAttach <- function(libname, pkgname) {
-  v <- tryCatch(as.character(utils::packageVersion(pkgname)),
-                error = function(e) "")
-  packageStartupMessage(
-    sprintf("methylQC %s -- run check_dependencies() to verify your environment.", v))
 }

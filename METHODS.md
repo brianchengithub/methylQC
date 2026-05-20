@@ -1,463 +1,706 @@
 # methylQC: Methods and Technical Documentation
 
-**Version 1.2.0**
+**Version 2.0.0**
+
+---
+
+## 0. What changed in v2.0.0
+
+Breaking changes from v1.x. There are no deprecation shims.
+
+- **No automatic exclusion.** v1.x wrote `exclude_samples.csv` and
+  `exclude_probes.csv` and built a "filtered" beta matrix internally.
+  v2.0.0 produces **flags only**. The user decides what to exclude and
+  applies it via `applymask()`.
+- **No probe-exclusion table at all.** `exclude_probes.csv`,
+  `probe_call_rates.csv`, and the `low_call_rate` flag are gone.
+  Probe-level masking is carried entirely by the `mask` and `detP`
+  matrices.
+- **`build_sample_exclusions()` is gone.** Its replacement, internal
+  `qcflags()`, computes per-sample low-detection and low-intensity
+  flags **only** — sex mismatch and age outliers are no longer rolled
+  into the `flagged` column.
+- **New exported utility `flagsamples()`** — given a detection p-value
+  matrix and a call-rate threshold, writes a CSV of samples below the
+  threshold. Advisory only.
+- **QC report restructured to 9 pages** with new colour rules
+  (see §3.3).
+- **Function and option names shortened** to single tokens
+  (no underscores) for the user-facing API. Internal helpers retain
+  underscores.
+
+API rename map for the user-facing surface:
+
+| v1.x                              | v2.0.0          |
+|-----------------------------------|-----------------|
+| `apply_mask`                      | `applymask`     |
+| `build_sample_exclusions`         | (internal `qcflags`) |
+| `build_probe_exclusions`          | (removed)       |
+| `check_sample_metadata`           | `checkmeta`     |
+| `check_snp_identity`              | `snpcheck`      |
+| `compute_qc_metrics`              | `qcmetrics`     |
+| `compute_qc_metrics_streaming`    | `qcstream`      |
+| `discover_idats`                  | `discover`      |
+| `edit_exclusions`                 | (removed)       |
+| `extract_snp_betas`               | `snpbetas`      |
+| `log_capture`                     | `logcapture`    |
+| `make_logger`                     | `makelog`       |
+| `methylQC_defaults`               | `mqcdefaults`   |
+| `methylQC_options`                | `mqcopts`       |
+| `methylQC_reset`                  | `mqcreset`      |
+| `methylQC_set`                    | `mqcset`        |
+| `prep_single`                     | `prepcell`      |
+| `run_epidish`                     | `rundish`       |
+| `run_opensesame`                  | `runsesame`     |
+| `write_qc_report`                 | `qcreport`      |
+| (new)                             | `flagsamples`   |
+
+---
 
 ## 1. Overview
 
-methylQC is a two-stage quality control pipeline for Illumina Infinium DNA methylation arrays (EPIC, EPICv2, 450K). It produces **unmasked, noob-corrected** beta and M-value matrices alongside separate quality mask and detection p-value matrices, giving users full control over which probe values to trust.
+methylQC is a two-stage QC pipeline for Illumina Infinium DNA
+methylation arrays (EPIC, EPICv2, 450K).
 
-The pipeline **flags** samples and probes but does not automatically filter them. A user-facing `apply_mask()` function applies any combination of quality masking, detection p-value thresholds, sex chromosome exclusion, probe/sample exclusions, probe type filtering, and optional similarity-based k-NN imputation.
+- **Stage 1 (`qc()`)** streams IDATs through SeSAMe's `openSesame`
+  pipeline (QCDP), computes per-sample QC metrics, extracts SNP probe
+  betas, and writes raw (unmasked) beta- and M-value matrices alongside
+  separate quality-mask and detection p-value matrices.
+- **Stage 2 (`prep()`/`prepcell()`)** flags samples for plot colouring,
+  produces a multi-page QC PDF, runs EpiDISH cell-type deconvolution
+  for blood-derived tissues, and writes a consolidated sample sheet.
 
-### 1.1 Two QC layers: quality vs. identity
+**Nothing is removed automatically.** The pipeline flags; the user
+applies exclusions via `applymask()`. The optional `flagsamples()`
+utility produces an advisory CSV of samples whose call rate falls
+below a user-chosen threshold.
 
-methylQC deliberately separates QC into two conceptually distinct sets of checks, because they detect different failure modes and a sample can pass one while failing the other.
-
-**Sample quality** asks *is the data technically sound?* It is a conservative screen for abnormally concerning samples and relies primarily on **MDS outliers**, **total intensity outliers**, and **detection p-value call rates**. The quality layer flags samples but does not delete data; detection p-values are exported as a full matrix so each downstream analysis sets its own threshold.
-
-**Sample identity / swaps** asks *is this sample who it claims to be?* It relies on the **sex check**, the **age check**, and **SNP genotyping**. These are independent of quality: a swapped or mislabeled sample frequently generates perfectly high-quality data and therefore would never be flagged by the quality layer. For this reason identity checks (`sex_mismatch`, `age_outlier`, SNP concordance) never contribute to the `flagged` quality column — they are reported in their own columns.
+---
 
 ## 2. Stage 1: Preprocessing (`qc()`)
 
 ### 2.1 IDAT discovery and sample sheet parsing
 
-The user supplies a single top-level directory. `discover_idats()` confines all discovery to that tree:
+`discover(dir, sheetpattern, basecol, platform, logger)` recursively
+scans the input directory for paired `_Grn.idat` / `_Red.idat` files.
+For each folder containing IDATs it locates a sample sheet (regex
+`sheetpattern`, default `"sample.*sheet.*\\.(csv|txt|tsv)$"`) with
+tab-vs-comma auto-detection, or synthesises one from filenames. The
+array platform is auto-detected from IDAT headers and checked for
+consistency across folders. Sentrix-format IDs are decomposed into
+`Chip`, `Row`, and `Col`.
 
-1. Every IDAT pair (`_Grn.idat` / `_Red.idat`) is found recursively.
-2. Every sample sheet matching the configurable pattern is found recursively and read (tab/comma auto-detected). Multiple sheets are **concatenated**, taking the union of their columns and filling absent columns with `NA`.
-3. Sheet rows are reconciled against the IDATs actually on disk. IDATs present on disk but absent from every sheet have a minimal row **synthesized** and appended (not written back to disk). Rows whose IDATs are missing on disk trigger a **warning** and are dropped. A mismatch is always a warning, never an error.
-4. Duplicate `sample_id` values (one sample appearing in more than one sheet row) are resolved by keeping the row with the **most non-missing values** (ties → first occurrence); a warning naming the `sample_id` and source sheet file(s) is emitted.
+### 2.2 Signal processing: openSesame and the QCDP pipeline
 
-The array platform is auto-detected from IDAT headers. Sentrix IDs are decomposed into Chip, Row, and Col.
+Each sample is processed through `sesame::openSesame(func = NULL,
+prep = "QCDP")`. `func = NULL` returns the processed `SigDF`. The
+`prep = "QCDP"` string is read left-to-right by SeSAMe: each letter is
+a preprocessing step applied in order.
 
-### 2.2 Signal processing (openSesame)
+1. **Q — Quality masking.** SeSAMe sets the `mask` column to `TRUE`
+   for probes with known design problems (multi-mapping, SNP overlap
+   at the CpG or single-base-extension site, cross-hybridisation).
+   This mask is platform-level and signal-independent.
+2. **C — Channel correction (NOOB).** Normal-exponential out-of-band
+   background subtraction. Sample-specific.
+3. **D — Dye-bias correction.** Non-linear correction of Cy3/Cy5
+   channel efficiency.
+4. **P — pOOBAH detection p-values.** Each probe's signal is compared
+   to the out-of-band hybridisation distribution; probes with
+   `p > 0.05` are additionally flagged in the `mask` column.
 
-Each sample is processed through SeSAMe's `openSesame(func = NULL, prep = "QCDPB")`. The `func = NULL` argument returns the processed SigDF. The `prep = "QCDPB"` pipeline applies five steps:
+Note that the `prep = "QCDP"` step order above is what SeSAMe runs.
+methylQC adds a fifth step purely at extraction time — call it B for
+"betas":
 
-1. **Q — Quality masking**: Probes with design issues are flagged in the SigDF's `mask` column (multi-mapping, SNP-overlapping CpG/SBE sites, cross-hybridizing sequences). This is a fixed, platform-level mask independent of sample signal.
-2. **C — Channel inference**: Infinium-I probe color channel is inferred from the data.
-3. **D — Dye-bias correction**: Non-linear Cy3/Cy5 channel efficiency correction.
-4. **P — pOOBAH detection p-values**: Each probe's signal is compared to the out-of-band hybridization distribution. Probes with p > 0.05 are additionally flagged in the `mask` column. Sample-specific.
-5. **B — noob background correction**: Normal-exponential out-of-band background subtraction.
-
-**Order matters: `P` runs before `B`.** noob modifies the out-of-band signal that pOOBAH uses as its null distribution, so detection p-values must be computed *before* noob. To honour this, the pipeline derives two SigDF states per sample:
-
-- A **pre-noob** SigDF (prep code up to and including `P`, i.e. `QCDP`): the **quality mask** and **detection p-values** are extracted from here.
-- The **full QCDPB** SigDF: the **beta and M-value** matrices are extracted from here, via `getBetas(sdf, mask = FALSE)` — betas come from noob-corrected intensities but masked probes are **not** set to NA.
-
-Consequently `detP_all.rds` is non-noob (correct), while `betas_all.rds` / `mvals_all.rds` are noob-corrected. The MDS plot uses the noob-corrected betas.
+5. **B — Beta extraction with `mask = FALSE`.** After QCDP, methylQC
+   calls `getBetas(sdf, mask = FALSE)` to produce **unmasked** betas
+   from the corrected intensities. The `mask` column is preserved and
+   returned as a separate matrix; the beta matrix itself contains no
+   NAs from masking. This decoupling is the central design choice:
+   downstream code applies masks (or doesn't) at its own discretion.
 
 ### 2.3 Output matrices
 
-All matrices are probes (rows) × samples (columns) in `.rds` format. Row names are probe IDs; column names are sample IDs.
+All matrices are probes (rows) × samples (columns), in `.rds`, with
+probe IDs as row names and sample IDs as column names. The single
+exception is `snp_betas.rds`, which is transposed (samples × rs probes).
 
-| File | Type | Description |
-|------|------|-------------|
-| `betas_all.rds` | numeric | Unmasked, noob-corrected betas. No NAs from masking. |
-| `mvals_all.rds` | numeric | `log2((beta + 1e-6) / (1 - beta + 1e-6))`, noob-corrected. |
-| `mask_all.rds` | logical | TRUE = failed quality mask or detection |
-| `detP_all.rds` | numeric | pOOBAH detection p-values (non-noob) |
-| `sdfs_all.rds` | list | Final QCDPB SigDF objects (saved by default) |
-| `snp_betas.rds` | numeric | **samples × probes** (transposed). Continuous rs probe betas. |
+| File              | Type    | Description                                                            |
+|-------------------|---------|------------------------------------------------------------------------|
+| `betas_all.rds`   | numeric | Unmasked betas from corrected intensities. No NAs from masking.        |
+| `mvals_all.rds`   | numeric | `log2((beta + 1e-6) / (1 - beta + 1e-6))`.                             |
+| `mask_all.rds`    | logical | `TRUE` = probe failed the quality mask **or** pOOBAH detection.        |
+| `detP_all.rds`    | numeric | pOOBAH detection p-values.                                             |
+| `snp_betas.rds`   | numeric | **Samples × rs probes**. Continuous rs-probe betas for identity check. |
+| `sample_sheet.csv`| table   | Merged sample sheet + per-sample QC metrics.                           |
+| `metadata.rds`    | list    | Platform, input dir, sample count, batch count, timestamp, pkg version.|
 
 ### 2.4 Probe types
 
-Probes are identified by ID prefix. Counts vary by platform:
+Probes are classified by ID prefix (no hard-coded counts):
 
-| Prefix | Type | EPIC | EPICv2 | HM450 |
-|--------|------|------|--------|-------|
-| `cg` | CpG methylation | ~846,000 | ~930,000 | ~482,000 |
-| `ch` | Non-CpG methylation | ~2,800 | ~2,900 | ~3,100 |
-| `rs` | SNP genotyping | 59 | 59 | 65 |
-| other | Non-standard | ~635 | varies | varies |
+| Prefix | Type                  | Approx counts (EPIC / EPICv2 / 450K) |
+|--------|-----------------------|--------------------------------------|
+| `cg`   | CpG methylation       | ~846k / ~930k / ~482k                |
+| `ch`   | Non-CpG methylation   | ~2.8k / ~2.9k / ~3.1k                |
+| `rs`   | SNP genotyping        | 59 / 59 / 65                         |
+| other  | Platform-specific     | ~635 / varies / varies               |
 
-The rs probe count is auto-detected by prefix (`grepl("^rs", ...)`), not hardcoded.
+"Other" is defined by exclusion: any probe whose ID does not start
+with `cg`, `ch`, or `rs`. On EPIC this includes `nv` (negative
+verification) probes among others.
 
-The "other" probes are defined by exclusion: any probe whose ID does not start with `cg`, `ch`, or `rs`. On EPIC, these include `nv` (negative verification) probes and other platform-specific probes. Users can inspect them:
-
-```r
-excl_p <- read.csv("results/exclude_probes.csv")
-other <- excl_p[grepl("non_cg_ch_probe", excl_p$reason), ]
-table(substr(other$probe_id, 1, 2))
-```
-
-Sex chromosome probes (~19,642 on EPIC) are a **subset of the cg probes** — all sex probes have the `cg` prefix. They are handled by a dedicated `exclude_sex` parameter in `apply_mask()`, independent of `probe_types`.
+**Sex chromosome probes** are a subset of `cg` probes — all sex
+probes have the `cg` prefix. In `applymask()` they are partitioned
+out of `"cg"` into their own category `"sex"` so the user can include
+or exclude them independently.
 
 ### 2.5 Per-sample QC metrics
 
-Computed from each SigDF during streaming:
+Computed by `qcmetrics()` (in-memory list of SigDFs) or `qcstream()`
+(streaming, one IDAT pair at a time). Both produce the same columns.
 
-**Detection rate (`frac_dt`)**: Fraction of probes passing pOOBAH.
+From `sesameQC_calcStats(funs = c("detection", "intensity", "numProbes",
+"channel", "dyeBias"))`:
 
-**Mean intensity, probe decomposition**: `n_masked_apriori`, `n_failed_detection`, `n_usable`, `frac_usable`.
+- **`frac_dt`** — fraction of probes passing detection (see §2.6 for
+  how this differs from a per-sample call rate computed from the
+  saved `detP_all.rds`).
+- **`mean_intensity`** — mean total intensity across probes.
+- Plus channel diagnostics, dye-bias diagnostics, and per-probe-type
+  counts.
 
-**Horvath epigenetic age (`horvath_age`)**: 353 CpG coefficients hard-coded from Horvath (2013). Computed on the **unmasked, noob-corrected** betas (`getBetas(sdf, mask = FALSE)` on the QCDPB SigDF). Per-CpG value precedence: (1) a clock CpG present on the platform contributes its actual beta — a present-but-failed probe still contributes its real value, since the age check is a coarse identity screen and is not re-imputed; (2) a clock CpG **absent from the platform manifest** contributes a hard-coded zero-shot reference median (`.horvath_zeroshot_betas`, 19 CpGs, derived from a large HM450 blood dataset). There is no 0.5 fallback. If fewer than 200 of the 353 clock CpGs can be resolved, the prediction is `NA`.
+Additional columns computed by methylQC:
 
-**Sex chromosome intensities (`sex_chrX_intensity`, `sex_chrY_intensity`)**: Median total intensity (MG + MR + UG + UR) over curated probe sets, extracted from the **pre-noob (`QCDP`)** SigDF. Sex inference and `mean_intensity` deliberately use **non-noob** signal: noob only subtracts background and cannot recover weak signal, so it offers no accuracy benefit for chromosome-presence calls and would only push weak-signal samples toward zero, making ambiguous samples worse. The curated probe sets are:
+- **Probe decomposition:** `n_probes_total`, `n_masked_apriori`,
+  `n_failed_detection`, `n_detected`, `n_usable`,
+  `frac_apriori_mask`, `frac_detection_among_unmasked`, `frac_usable`.
+  These split SeSAMe's combined mask into the quality-mask and
+  detection-mask components.
+- **`horvath_age`** — Horvath (2013) epigenetic age. Uses
+  `getBetas(sdf)` (i.e. **masked** betas) so masked probes don't
+  enter the clock; requires ≥200 clock probes present.
+- **`sex_chrX_intensity` / `sex_chrY_intensity`** — median total
+  intensity (`MG + MR + UG + UR`) over the curated probe sets
+  `.sesame_chrX_xlinked` (3,433 non-PAR X-inactivated probes) and
+  `.sesame_chrY_clean` (314 non-PAR Y-specific probes with
+  cross-hybridising probes removed). Both lists are baked into
+  `sex_probe_lists.R` to avoid silent failures when the SeSAMe data
+  cache is missing.
 
-- **chrY.clean** (314 probes): Non-PAR Y-chromosome probes from which cross-hybridizing probes have been removed. "Cross-hybridizing" means the probe sequence has significant homology to **any non-Y genomic region** (autosomal or chrX), not just chrX. Of ~548 non-PAR chrY probes on EPIC, 234 are excluded, leaving 314 with clean sex-dimorphic signal.
+`checkmeta(ss, qcdf, logger)` cross-checks reported sex and reported
+age against the inferred values **for the log only**; it does not
+produce flags.
 
-- **chrX.xlinked** (3,433 probes): X-inactivation-specific probes, also restricted to **non-PAR** regions of chrX. These are the subset of chrX probes that are subject to X-chromosome inactivation in females, identified from X-inactivation status annotations in the SeSAMe `probeInfo` database (derived from Carrel & Willard 2005 and Cotton et al. 2015 escape-from-inactivation catalogs). Of ~19,093 non-PAR chrX probes on EPIC, 3,433 are selected as consistently inactivated, excluding probes that escape X-inactivation (which show similar methylation in both sexes and reduce discriminating power).
+### 2.6 `frac_dt` is not the same as `colMeans(detP <= 0.05)`
 
-Both sets are hardcoded in `sex_probe_lists.R` from `sesameDataGet("EPIC.probeInfo")`.
+This distinction matters in v2.0.0 because `flagsamples()` computes
+sample call rate from `detP_all.rds` directly, whereas the QC report
+and sample sheet use SeSAMe's `frac_dt`.
 
-## 3. Stage 2: Flagging and QC Report (`prep_single()`)
+- **`frac_dt`** is reported by `sesameQC_calcStats(funs = "detection")`
+  and stored on the sample sheet. SeSAMe computes it from the SigDF's
+  internal state; the exact denominator depends on the SeSAMe version
+  but is generally the fraction of **non-quality-masked** probes that
+  pass pOOBAH.
+- **`colMeans(detP <= 0.05)`** computed on `detP_all.rds` uses **all
+  probes**, regardless of quality mask. It is also strictly bounded by
+  whatever pOOBAH actually wrote into `detP`.
 
-### 3.1 Sample flagging (quality layer)
+These two values can differ by a few percent. `flagsamples()` returns
+the latter; it is reproducible, independent of SeSAMe internals, and
+the natural quantity to threshold for advisory exclusion. Compare to
+`frac_dt` only if you want to understand a single sample, not to
+build an exclusion list.
 
-Samples are **flagged** (not removed) based on detection rate and mean intensity — the sample *quality* layer. Sex mismatches and age outliers belong to the *identity* layer and do NOT contribute to `flagged`: a swapped sample is often high quality, so folding identity into the quality flag would hide it.
+---
 
-### 3.2 Probe flagging
+## 3. Stage 2: Flagging and QC Report (`prepcell()`)
 
-Probes are flagged in `exclude_probes.csv`: low call rate, sex chromosome, SNP, and other non-cg/ch.
+### 3.1 Sample flagging — `qcflags()` (internal)
+
+Per-sample flags used **only to colour QC plots**. Writes nothing to
+disk, produces no exclusion list. Two flag types:
+
+- **Low detection** — `frac_dt < samplemin` (default 0.95, strict `<`).
+- **Low intensity** — `mean_intensity < intmin` (default 1300,
+  strict `<`).
+
+Sex mismatch and age outliers are deliberately **not** rolled into
+`flagged`. They have their own dedicated columns in the consolidated
+sample sheet and their own QC-report panels.
+
+### 3.2 `flagsamples()` — advisory, opt-in CSV of low-call-rate samples
+
+Standalone exported utility. Signature:
+
+```r
+flagsamples(detP,
+            callrate = NULL,          # default = mqcopts()$samplemin (0.95)
+            pthresh  = NULL,          # default = mqcopts()$detp      (0.05)
+            csv      = "flagged_samples.csv",
+            logger   = NULL)
+```
+
+For each sample, computes `colMeans(detP <= pthresh, na.rm = TRUE)`
+(see §2.6) and writes the rows with call rate below `callrate` to
+`csv`. Returns the full table invisibly. **Does not modify any
+matrix and does not accept hand-picked IDs** — those go into
+`applymask(exclude = …)`.
 
 ### 3.3 QC diagnostic report (PDF)
 
-**Page 1 — Detection rate**: Bar chart of `frac_dt`, flagged in red.
+Nine pages, in this order. Colour rules per panel are listed
+explicitly; legend visibility follows the same rules.
 
-**Page 2 — MDS**: Classical MDS on the **top N most variable** autosomal cg/ch probes (ranked by `matrixStats::rowVars()`, highest variance first; configurable via `n_top_variable`, default 100,000) with complete data across ALL samples.
+| Page | Panel                                | Colour by                                   |
+|------|--------------------------------------|---------------------------------------------|
+| 1    | Detection rate per sample (bar)      | Low-detection flag (`frac_dt < samplemin`)  |
+| 2    | Per-probe sample-failure histogram (tail only) | Single colour; tail-only by design |
+| 3    | MDS on all non-sex cg/ch probes      | MDS outlier (4 SD from geometric median)    |
+| 4    | Mean intensity per sample (histogram)| MDS outlier (precedence) > low-intensity > OK |
+| 5    | Sample beta-value density            | Low-intensity flag                          |
+| 6    | Sex check (chrX vs chrY intensity)   | Reported sex (F / M / n/a)                  |
+| 7    | Reported vs Horvath age              | Sex-mismatch flag                           |
+| 8    | Scree plot                           | (no colour-coding)                          |
+| 9    | PC vs associated variable, 2×3 panel | The variable's levels/values                |
 
-**Page 3 — Intensity histogram**: Colored by MDS outlier status.
+**Page 1 — Detection rate.** Horizontal bar per sample, ordered by
+`frac_dt`. Dashed line at `samplemin`. Bars below the threshold are
+red.
 
-**Page 4 — Probe failure rate**: All probes, all samples.
+**Page 2 — Per-probe sample-failure histogram (tail only).** Replaces
+v1.x's per-probe call-rate distribution. The bulk of probes failing
+in near-0% of samples is intentionally omitted so the tail is
+visible. The plot is built from `detP` by default
+(`rowMeans(detP > pthresh)`); if `detP` is unavailable, falls back to
+`mask`, then to `is.na(betas)`. Quality-masked probes are excluded
+from the histogram by default (`inclqual = FALSE`); set
+`inclqual = TRUE` to include them. The configurable threshold is
+`failmin` (default 0.95): probes with failure rate ≥ `failmin` form
+the tail. All tail probes are written to `failed_probes.csv`.
 
-**Page 5 — Beta density**: Per-sample density curves. Probes subsampled to 100,000 by **random sampling** (uniform without replacement). Lines colored by QC status (OK / high probe failure / low intensity).
+**Page 3 — MDS.** Classical multidimensional scaling on **all**
+complete-case cg/ch non-sex probes (v1.x took a top-variable subset
+of 100,000 — v2.0.0 uses all). Distance matrix is Euclidean over
+samples (`dist(t(betas))`); embedding via `cmdscale(d, k = 2)`.
+Outliers are samples whose distance from the geometric median (via
+Weiszfeld iteration) exceeds 4 standard deviations of the all-samples
+distance distribution. A dashed circle marks the 4-SD ring.
 
-**Page 6 — Sex check** *(identity layer)*: chrX.xlinked vs. chrY.clean intensity scatter. Optimized chrY threshold minimizes total absolute residuals from within-cluster regressions. Confidence bands are drawn **parallel to each cluster's regression line**, extending ±5 SD (from the within-cluster orthogonal distances) perpendicular to the line.
+**Page 4 — Mean intensity.** Histogram of `mean_intensity` with
+samples grouped by colour. The colour is three-category with a strict
+precedence rule:
 
-*Edge case*: If a sample falls below the chrY threshold but within 5 SD of the male regression line, the crude threshold is used as the tiebreaker — the sample is classified as female.
+```
+MDS outlier  >  Low intensity  >  OK
+```
 
-> **Visual inspection recommended.** The sex check algorithm is generally robust, but edge cases (XXY karyotypes, mosaic sex chromosome loss, contaminated samples) can produce ambiguous results. Always inspect the sex check plot. Samples flagged as mismatches or unclear should be investigated individually — examine their position relative to both bands and consider re-extracting metadata.
+A sample that is both an MDS outlier *and* below `intmin` is shown as
+"MDS outlier" — MDS-outlier colour wins. Dashed vertical line at
+`intmin`.
 
-**Page 7 — Age check** *(identity layer)*: Reported vs. Horvath predicted age. Confidence band extends ±3 SD perpendicular to the best-fit regression line. The clock runs on unmasked, noob-corrected betas.
+**Page 5 — Beta density.** One density curve per sample, overlaid on
+a single panel. Density is computed with `density(x, from = 0, to = 1,
+n = 512)` on each sample's cg/ch beta values (NAs excluded; values
+clamped to `[0, 1]`). Lines are coloured by the low-intensity flag
+(red for low-intensity, blue for OK). No legend.
 
-> **Visual inspection recommended.** The Horvath clock was trained primarily on blood and brain tissues and performs less well on other tissue types (e.g., muscle, r ≈ 0.70). The 3 SD threshold may flag samples that are biologically normal for the tissue. Review the plot to distinguish genuine annotation errors from expected tissue-specific clock behavior.
+**Page 6 — Sex check.** Scatter of `sex_chrX_intensity` (X)
+vs `sex_chrY_intensity` (Y) coloured by reported sex (F / M / n/a).
+Algorithm:
 
-**Pages 8–9 — PCA**: Scree plot followed by 6 PC scatter plots condensed onto 2 pages (3 per page via `gridExtra::grid.arrange()`). PCA uses the **top N most variable** autosomal cg/ch probes (same `n_top_variable`, non-flagged samples only, `prcomp(scale. = TRUE)`).
+1. Search `chrY` quantiles (`probs = seq(0.15, 0.85, 0.01)`) for the
+   threshold that minimises within-cluster sum-of-absolute-residuals
+   from two regressions, one for `chrY <= thr` (female) and one for
+   `chrY > thr` (male).
+2. Fit `lm(chrY ~ chrX)` separately within each cluster.
+3. For each sample, compute orthogonal distance to each line; classify
+   as F or M if within 5 SD of one band and >5 SD of the other.
+   Within both bands → use the crude threshold as tiebreaker; outside
+   both → "Unclear".
+4. Mismatch = reported ≠ inferred and inferred is not "Unclear".
 
-For each of the first 6 PCs, the algorithm tests every non-QC sample sheet column for association with that PC's scores:
+Confidence bands (5 SD perpendicular distance) are drawn shaded around
+each regression line. Visual inspection is recommended — XXY,
+mosaic-loss-of-Y, and contaminated samples can land in edge regions.
 
-- **Continuous variables** (numeric columns): Pearson correlation coefficient is computed between the PC scores and the variable. The variable with the highest |r| is selected.
-- **Categorical variables** (factor/character columns with 2–20 unique levels): A one-way ANOVA F-test is computed (`lm(PC_scores ~ factor(variable))`). The variable with the smallest p-value is selected (must be p < 0.05 to qualify).
+**Page 7 — Age check.** Reported vs Horvath predicted age. Robust age
+parser strips `"y"`, `"yrs"`, etc. Fits `lm(horvath ~ reported)`.
+Outliers are samples whose orthogonal distance to the regression line
+exceeds 3 SD of the residual distribution. Points are coloured by
+the sex-mismatch flag (red for mismatch, blue for OK). Visual
+inspection is recommended — the Horvath clock is trained on blood
+and brain; expect lower fit in other tissues.
 
-Continuous and categorical candidates compete on a common scale: |r| is compared as `-abs(r)`, and ANOVA p-value is compared as `log10(p)`. The variable with the best score (highest |r| or lowest p-value) is shown as the plot title and used for point coloring (viridis scale for continuous, discrete colors for categorical). Columns excluded from testing: `sample_id`, `Basename`, `batch_folder`, `horvath_age`, `detected_platform`, SeSAMe QC statistics, and sex chromosome intensities.
+**Page 8 — Scree.** Bar plot of `% variance explained` for the first
+`min(20, npc)` PCs. Title includes the actual number of probes used
+in the PCA so the user can sanity-check the input size. This is the
+only PCA panel that displays percent-variance.
+
+**Page 9 — PC vs associated variable, 2×3 single page.** For each of
+the first 6 PCs, the algorithm scans every non-QC sample-sheet column
+and selects the one most associated with the PC's scores:
+
+- **Numeric columns:** Pearson `|r|` with the PC. Variable maximising
+  `|r|` wins.
+- **Categorical columns (2–20 unique levels):** one-way ANOVA F-test
+  `lm(PC ~ factor(var))`; variable minimising p-value wins, must be
+  p < 0.05 to qualify.
+- Continuous and categorical compete on a common scale: continuous
+  uses `-abs(r)`, categorical uses `log10(p)`; lower wins.
+
+Each panel renders the chosen variable on the x-axis (scatter for
+numeric, jittered points + boxplot for categorical), with the
+selection metric printed as subtitle (e.g. `|r|=0.812` or
+`ANOVA p=3.1e-04`). No `% variance` is printed — that lives only on
+the scree plot (page 8). Excluded from association testing:
+`sample_id`, `Basename`, `batch_folder`, `sheet_path`, `horvath_age`,
+`detected_platform`, raw IDAT columns, methylQC-internal QC columns,
+and sex chromosome intensities (regex
+`"^frac_|^n_|^num_|^mean_|^na_|^med[RG]$|^top[RG]$|^InfI_|^RG|^sex_chr"`).
+
+PCA itself uses `prcomp(t(betas), scale. = TRUE)` on the top
+`ntop` (default 100,000) most-variable probes among cg/ch non-sex
+probes, complete cases only. PC scores for all PCs are written to
+`pc_scores.csv`.
 
 ### 3.4 EpiDISH cell-type deconvolution
 
-EpiDISH is run as a **purity / contamination check**. For blood-derived tissues — whole blood, PBMC, buffy coat, and isolated/sorted blood cell populations — `run_epidish()` deconvolves the **unmasked** beta matrix. A cleanly sorted population should be dominated by a single cell type; an unexpectedly mixed profile, or immune signal in a putatively non-immune sample, indicates contamination.
+For blood-derived tissues (cell-type label matches
+`mqcopts()$bloodtypes`; default `c("PBMC", "WB", "WBC", "buffy coat",
+"whole blood", "peripheral blood", "leukocyte", "leucocyte")` with
+case-insensitive normalisation), `rundish()` runs EpiDISH with the
+RPC method and the `centDHSbloodDMC.m` reference (7 cell types: B,
+NK, CD4T, CD8T, Monocytes, Neutrophils, Eosinophils) on the raw
+unmasked beta matrix. Proportions are written to
+`cell_proportions.csv` and merged into `sample_sheet.csv`.
 
-The default reference is **`cent12CT.m`** — 12 leukocyte subtypes (naive/memory CD4T, naive/memory CD8T, naive/memory B, Treg, NK, monocytes, neutrophils, eosinophils, basophils). The reference is configurable via the `epidish_reference` option, which accepts either a single panel name or a character vector of names (each is run, and the results are returned as a named list).
-
-EpiDISH's RPC method constrains estimates to **sum to 1**. This is only meaningful for immune/blood tissue: running an immune-only reference on a non-immune tissue would force the estimates into a meaningless simplex regardless of the true composition. Deconvolution is therefore restricted to the blood/immune allowlist (`epidish_cell_types`); it is **not** run on non-blood tissue.
-
-#### Reference panels
-
-| Reference | Cell types |
-|-----------|-----------|
-| `cent12CT.m` *(default)* | 12 leukocyte subtypes (naive/memory CD4T & CD8T & B, Treg, NK, Mono, Neutro, Eosino, Baso) |
-| `centDHSbloodDMC.m` | 7 types: B, NK, CD4T, CD8T, Mono, Neutro, Eosino |
-| `centEpiFibIC.m` | Epithelial, fibroblast, total immune (solid tissue) |
-| `centBloodSub.m` | Blood sub-types (recent EpiDISH versions) |
-
-#### Runtime robustness
-
-methylQC does not silently install or update packages. Instead:
-
-- `DESCRIPTION` declares minimum versions (`sesame >= 1.20.0`, `EpiDISH >= 2.18.0`, etc.).
-- `check_dependencies()` verifies the R version, package versions, the SeSAMe data cache, and the presence of the default EpiDISH reference, printing the exact fix command for anything missing.
-- At runtime, `resolve_epidish_reference()` confirms the requested reference panel exists in the installed EpiDISH and stops with an actionable message if not.
-
-#### Non-blood tissue deconvolution
-
-For non-blood tissues, run deconvolution manually with an appropriate reference:
+For non-blood tissues, run deconvolution manually with an appropriate
+reference:
 
 ```r
 library(EpiDISH)
 betas <- readRDS("results/betas_all.rds")
 
-# Custom reference for any tissue:
+# Brain (Guintivano et al. 2013, Epigenetics 8(3):290-302)
+data(BrainDMC, package = "EpiDISH")
+result <- epidish(beta.m = betas, ref.m = BrainDMC, method = "RPC")$estF
+
+# Custom reference
 custom_ref <- as.matrix(read.csv("my_reference.csv", row.names = 1))
 overlap <- intersect(rownames(betas), rownames(custom_ref))
-result <- epidish(beta.m = betas[overlap, ], ref.m = custom_ref[overlap, ],
+result <- epidish(beta.m = betas[overlap, ],
+                  ref.m  = custom_ref[overlap, ],
                   method = "RPC")$estF
 ```
 
 ### 3.5 Consolidated sample sheet
 
-A single `sample_sheet.csv` contains ALL samples with columns added by the pipeline:
+A single `sample_sheet.csv` per Stage 2 slice (one per cell type if
+`bycell = TRUE`) contains all input rows with these added columns:
 
-| Column | Type | How computed |
-|--------|------|--------------|
-| `flagged` | logical | `frac_dt` < threshold or `mean_intensity` < threshold |
-| `flag_reason` | character | e.g., `"low_detection(0.831)"` |
-| `reported_sex_normalized` | character | M/F/NA via `normalize_sex()` |
-| `inferred_sex_intensity` | character | F/M/Unclear from intensity-based clustering |
-| `sex_mismatch` | logical | Reported ≠ inferred AND both are confident |
-| `sex_unclear` | logical | Outside both 5 SD confidence bands |
-| `age_outlier` | logical | > 3 SD from age regression line |
-| `reported_age_parsed` | numeric | Robust parsing of "45y", "NA", etc. |
-| `B`, `NK`, `CD4Tnv`, `CD4Tmem`, `Treg`, `CD8Tnv`, `CD8Tmem`, `Mono`, `Neu`, `Eos`, `Baso`, ... | numeric | EpiDISH proportions, one column per reference cell type (blood/immune tissues only; columns depend on the reference panel) |
+| Column                     | Type       | Source                                              |
+|----------------------------|------------|-----------------------------------------------------|
+| `flagged`                  | logical    | `frac_dt < samplemin` OR `mean_intensity < intmin`  |
+| `flag_reason`              | character  | e.g. `"low_detection(0.831);low_intensity(1102)"`   |
+| `reported_sex_normalized`  | character  | `normalize_sex()` of `sexcol`                       |
+| `inferred_sex_intensity`   | character  | F / M / Unclear from page-6 sex check               |
+| `sex_mismatch`             | logical    | reported ≠ inferred, both confident                 |
+| `sex_unclear`              | logical    | outside both 5 SD bands                             |
+| `age_outlier`              | logical    | >3 SD from age regression                           |
+| `reported_age_parsed`      | numeric    | robust parser of `agecol`                           |
+| `B, NK, CD4T, CD8T, Mono, Neutro, Eosino` | numeric | EpiDISH (blood only)                  |
 
-## 4. Applying masks and filtering downstream (`apply_mask()`)
+---
 
-### Basic usage
+## 4. Applying masks: `applymask()`
+
+`applymask()` is where exclusion actually happens. The function is
+deterministic and never reaches into the sample sheet; the user
+passes IDs explicitly.
+
+### 4.1 Signature
+
+```r
+applymask(mat,
+          mask     = NULL,          # logical matrix; TRUE = mask out
+          detP     = NULL,          # numeric matrix; mask if detP > pthresh
+          pthresh  = 0.05,
+          exclude  = NULL,          # sample IDs to drop (columns)
+          probes   = c("cg", "ch"), # categories to keep
+          platform = NULL,          # required if "cg" or "sex" in probes
+          impute   = FALSE,
+          knnk     = 10L,
+          chunk    = 50000L)
+```
+
+`probes` is a character vector of probe categories to **keep**:
+
+| Token   | Meaning                                                    |
+|---------|------------------------------------------------------------|
+| `"cg"`  | Autosomal CpG (cg probes NOT on chrX/chrY).                |
+| `"ch"`  | Non-CpG methylation (ch probes).                           |
+| `"sex"` | Sex chromosome probes (chrX, chrY) of any prefix.          |
+| `"snp"` | rs probes.                                                 |
+| `"other"`| Everything else (e.g. `nv`).                              |
+
+Pass `NULL` to keep every probe (no category filter). The five
+categories form a strict partition — `"cg"` always excludes
+sex-chromosome cg probes, and `"sex"` always excludes from the others.
+
+`platform` is required iff `"cg"` or `"sex"` is in `probes`, because
+the sex-vs-autosomal split is read from the SeSAMe manifest.
+
+### 4.2 Order of operations
+
+1. **Quality mask** → set positions where `mask == TRUE` to `NA`.
+2. **Detection** → set positions where `detP > pthresh` to `NA`.
+3. **Exclude samples** → drop columns whose name is in `exclude`.
+4. **Probe category filter** → keep only probes in any of the
+   `probes` categories.
+5. **k-NN imputation** (optional) → chunked `impute::impute.knn`
+   with `k = knnk`, chunk size `chunk`.
+
+### 4.3 Common workflows
 
 ```r
 betas <- readRDS("results/betas_all.rds")
 mask  <- readRDS("results/mask_all.rds")
 detP  <- readRDS("results/detP_all.rds")
-excl_p <- read.csv("results/exclude_probes.csv")
-ss     <- read.csv("results/sample_sheet.csv")
-```
+ss    <- read.csv("results/sample_sheet.csv")
 
-### Common workflows
+# Standard EWAS: autosomal CpG, mask + detP, drop flagged samples
+betas_ewas <- applymask(
+  betas, mask = mask, detP = detP, pthresh = 0.05,
+  exclude  = ss$sample_id[ss$flagged],
+  probes   = "cg",
+  platform = "EPIC")
 
-```r
-# --- Standard EWAS: autosomal CpG, mask + detP, exclude flagged samples ---
-betas_ewas <- apply_mask(
-  betas,
-  mask = mask,
-  detP = detP, detP_thresh = 0.05,
-  exclude_probes = excl_p$probe_id,
-  exclude_samples = ss$sample_id[ss$flagged],
-  exclude_sex = TRUE, platform = "EPIC",
-  probe_types = "cg"
-)
+# CpG + non-CpG methylation, autosomal
+betas_all_meth <- applymask(
+  betas, mask = mask, detP = detP,
+  probes = c("cg", "ch"), platform = "EPIC")
 
-# --- Include non-CpG methylation probes ---
-betas_all_meth <- apply_mask(
-  betas,
-  mask = mask, detP = detP,
-  exclude_probes = excl_p$probe_id,
-  exclude_samples = ss$sample_id[ss$flagged],
-  exclude_sex = TRUE, platform = "EPIC",
-  probe_types = c("cg", "ch")
-)
+# Keep sex chromosome probes alongside autosomes
+betas_with_sex <- applymask(
+  betas, mask = mask, detP = detP,
+  probes = c("cg", "sex"), platform = "EPIC")
 
-# --- Keep sex chromosome probes (e.g., for X-inactivation analysis) ---
-betas_with_sex <- apply_mask(
-  betas,
-  mask = mask, detP = detP,
-  exclude_probes = excl_p$probe_id,
-  exclude_samples = ss$sample_id[ss$flagged],
-  exclude_sex = FALSE,              # <-- retain sex chrom probes
-  probe_types = "cg"
-)
+# Sex chromosome probes only
+betas_sex_only <- applymask(
+  betas, mask = mask, detP = detP,
+  probes = "sex", platform = "EPIC")
 
-# --- Sex chromosome probes ONLY ---
-# First apply mask/detP, then keep only probes on sex chromosomes
-betas_sex_only <- apply_mask(
-  betas,
-  mask = mask, detP = detP,
-  exclude_sex = FALSE,
-  probe_types = "cg"
-)
-sex_probes <- get_sex_probes("EPIC")
-betas_sex_only <- betas_sex_only[rownames(betas_sex_only) %in% sex_probes, ]
+# SNP probes only (for identity work)
+betas_snp <- applymask(
+  betas, probes = "snp", platform = "EPIC")
 
-# --- SNP probes only (for identity verification) ---
-betas_snp <- apply_mask(betas, exclude_sex = FALSE, platform = "EPIC",
-                         probe_types = "rs")
+# Minimal: just quality mask, no category filter
+betas_masked <- applymask(
+  betas, mask = mask, probes = NULL)
 
-# --- Minimal: just quality mask, keep everything ---
-betas_masked <- apply_mask(betas, mask = mask, exclude_sex = FALSE)
+# Strict detection + k-NN imputation
+betas_strict <- applymask(
+  betas, mask = mask, detP = detP, pthresh = 0.01,
+  exclude  = ss$sample_id[ss$flagged],
+  probes   = "cg", platform = "EPIC",
+  impute   = TRUE, knnk = 10, chunk = 50000)
 
-# --- Strict detection threshold + imputation ---
-betas_strict <- apply_mask(
-  betas,
-  mask = mask,
-  detP = detP, detP_thresh = 0.01,  # stricter than default 0.05
-  exclude_probes = excl_p$probe_id,
-  exclude_sex = TRUE, platform = "EPIC",
-  probe_types = "cg",
-  impute = TRUE, knn_k = 50, knn_var_probes = 30000
-)
-
-# --- Apply the same filtering to M-values ---
+# Same filter applied to M-values
 mvals <- readRDS("results/mvals_all.rds")
-mvals_clean <- apply_mask(
-  mvals,
-  mask = mask, detP = detP,
-  exclude_probes = excl_p$probe_id,
-  exclude_samples = ss$sample_id[ss$flagged],
-  exclude_sex = TRUE, platform = "EPIC",
-  probe_types = "cg"
-)
+mvals_clean <- applymask(
+  mvals, mask = mask, detP = detP,
+  exclude  = ss$sample_id[ss$flagged],
+  probes   = "cg", platform = "EPIC")
 ```
 
-### Order of operations
-
-1. Quality mask → set masked values to NA
-2. Detection p-value → set values with p > threshold to NA
-3. Remove excluded samples (columns)
-4. Remove excluded probes (rows)
-5. Remove sex chromosome probes (if `exclude_sex = TRUE`)
-6. Filter by probe type prefix
-7. Similarity-based k-NN imputation (if `impute = TRUE`)
-
-### Imputation algorithm
-
-`apply_mask(..., impute = TRUE)` runs similarity-based k-NN imputation, replacing the earlier `impute::impute.knn` approach (the `impute` package is no longer a dependency):
-
-1. **Variable-probe restriction.** Sample-to-sample distances are computed on the top `knn_var_probes` (default 30,000) most-variable probes. The bulk of the array is near-constant and would dominate an all-probe distance; restricting to variable probes is what makes "nearest neighbour" biologically meaningful.
-2. **Distance.** Pairwise **Euclidean** distance between samples, computed over the probes both samples have non-missing and rescaled to a full-length distance so partial overlap is handled.
-3. **Imputation.** Each missing value is filled with the **inverse-distance-weighted mean** of the `knn_k` (default 50) nearest-neighbour samples' values at that probe. Neighbours that are themselves missing at that probe are skipped.
-4. **No fabrication.** There is no constant fallback. A value missing in a sample and in all of its usable neighbours is left as `NA`.
-
-### Probe retention reference
-
-| Goal | `exclude_sex` | `probe_types` |
-|------|---------------|---------------|
-| Autosomal CpG (standard EWAS) | `TRUE` | `"cg"` |
-| All methylation (CpG + non-CpG) | `TRUE` | `c("cg", "ch")` |
-| Include sex chromosomes | `FALSE` | `"cg"` or `c("cg", "ch")` |
-| Sex chromosome probes only | `FALSE` + post-filter | `"cg"` |
-| SNP probes only | `FALSE` | `"rs"` |
-| Everything | `FALSE` | `NULL` |
+---
 
 ## 5. Configuration
 
-### Column names
+All tunable parameters are stored as package options under the
+`methylQC.` prefix. Inspect with `mqcopts()`, override with
+`mqcset()`, reset with `mqcreset()`.
 
-| Parameter | Default | Aliases |
-|-----------|---------|---------|
-| `sample_id_col` | sample_id | Sample_ID, SampleID, Sample_Name |
-| `donor_col` | Donor | Subject, Participant, SubjectID, DonorID |
-| `reported_sex_col` | Reported_Sex | Sex, gender, Gender, Female, Male |
-| `reported_age_col` | Age | age_years, AgeYears, age_at_sample |
-| `batch_col` | batch_folder | Batch, Plate, Slide, Chip |
-| `cell_col` | Cell | Cell_Type, Tissue, Sample_Type, Source |
+### 5.1 Column-name options
 
-### QC thresholds
+| Option         | Default          | Aliases                                                  |
+|----------------|------------------|----------------------------------------------------------|
+| `idcol`        | `sample_id`      | `Sample_ID`, `SampleID`, `Sample_Name`                   |
+| `basecol`      | `Basename`       | (single value)                                           |
+| `donorcol`     | `Donor`          | `Subject`, `Participant`, `SubjectID`, `DonorID`         |
+| `sexcol`       | `Reported_Sex`   | `Sex`, `gender`, `Gender`, `Female`, `Male`              |
+| `agecol`       | `Age`            | `age_years`, `AgeYears`, `age_at_sample`                 |
+| `batchcol`     | `batch_folder`   | `Batch`, `Plate`, `Slide`, `Chip`                        |
+| `cellcol`      | `Cell`           | `Cell_Type`, `Tissue`, `Sample_Type`, `Source`           |
+| `sheetpattern` | `"sample.*sheet.*\\.(csv|txt|tsv)$"` | (regex)                                |
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `prep_code` | `"QCDPB"` | SeSAMe openSesame prep code |
-| `sample_call_min` | 0.95 | Minimum frac_dt |
-| `probe_call_min` | 0.95 | Minimum probe call rate |
-| `intensity_min` | 1300 | Minimum mean intensity |
-| `n_top_variable` | 100000 | Most-variable probes for MDS/PCA |
-| `knn_k` | 50 | Nearest-neighbour samples for imputation |
-| `knn_var_probes` | 30000 | Most-variable probes for imputation distances |
-| `save_sdfs` | TRUE | Save the final SigDF list (`sdfs_all.rds`) |
+Each `*col` has a matching `*aliases` option for the search list when
+the primary name is absent (e.g. `donoraliases`, `sexaliases`).
 
-### EpiDISH and EPICv2 options
+### 5.2 Threshold options
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `epidish_reference` | `"cent12CT.m"` | Reference panel name, or a vector of names |
-| `epidish_method` | `"RPC"` | EpiDISH deconvolution method |
-| `epicv2_harmonize` | `FALSE` | Enable EPICv2 de-duplication + ID harmonization |
-| `epicv2_target` | `"EPIC"` | Harmonization target: `"EPIC"` or `"HM450"` |
+| Option       | Default | Meaning                                                                                       |
+|--------------|---------|-----------------------------------------------------------------------------------------------|
+| `samplemin`  | 0.95    | Sample call-rate threshold. Sample is flagged low-detection if `frac_dt < samplemin` (strict).|
+| `probemin`   | 0.95    | Probe pass-rate threshold (used in the inline probe-breakdown console summary).               |
+| `intmin`     | 1300    | Sample is flagged low-intensity if `mean_intensity < intmin` (strict).                        |
+| `detp`       | 0.05    | A probe passes detection at `detP <= detp`; fails at `detP > detp`.                           |
+| `ntop`       | 100000  | Number of top-variance probes used by PCA (page 9). MDS (page 3) uses **all** cg/ch non-sex.  |
+| `failmin`    | 0.95    | Page-2 tail cutoff: probes with sample-failure rate `>= failmin` enter the histogram / CSV.   |
+| `inclqual`   | `FALSE` | Page-2 setting: include quality-masked probes in the failure histogram if `TRUE`.             |
+| `cores`      | 1       | Cores for SeSAMe (kept low because streaming is per-sample).                                  |
+| `savesdf`    | `FALSE` | Persist the full SigDF list to disk (memory-expensive).                                       |
+| `collapse`   | `FALSE` | Collapse EPICv2 replicates to prefix.                                                         |
+| `collapsemethod` | `"mean"` | `"mean"` or `"minPvalue"`.                                                                |
+| `dishref`    | `"centDHSbloodDMC.m"` | EpiDISH reference dataset.                                                       |
+| `dishmethod` | `"RPC"` | EpiDISH method.                                                                               |
+| `bloodtypes` | (see source) | Cell-type labels that trigger EpiDISH.                                                   |
 
-### Changing thresholds
-
-```r
-# Before running the pipeline
-methylQC_set(sample_call_min = 0.90, intensity_min = 1000)
-pipeline(in_dir = "data/idats", out_dir = "results")
-
-# Or pass as arguments (temporary)
-pipeline(in_dir = "data/idats", out_dir = "results",
-         sample_call_min = 0.90)
-
-# Re-run Stage 2 only with different thresholds
-methylQC_set(sample_call_min = 0.85)
-prep(stage1_dir = "results")
-
-# Change detection p-value threshold at apply_mask() time
-betas_strict <- apply_mask(betas, detP = detP, detP_thresh = 0.01)
-
-# Check current settings
-str(methylQC_options())
-
-# Reset to defaults
-methylQC_reset()
-```
-
-## 6. EPICv2 de-duplication and probe ID harmonization
-
-EPICv2 targets many CpGs with multiple replicate probes — probe IDs sharing a `cg`/`ch` prefix but differing by a design suffix (Infinium chemistry, strand, replicate index). For a cohort analysis every sample must use the **same physical probe** for a given CpG; otherwise probe-design differences become a source of technical variation that confounds downstream comparisons.
-
-This behaviour is controlled by a single option, **off by default**:
+### 5.3 Changing thresholds
 
 ```r
-methylQC_set(epicv2_harmonize = TRUE,
-             epicv2_target    = "EPIC")   # or "HM450"
+# Set globally before any methylQC call
+mqcset(samplemin = 0.90, intmin = 1000)
+pipeline(indir = "data/idats", outdir = "results")
+
+# Or pass as ... — temporary override for one call
+pipeline(indir = "data/idats", outdir = "results", samplemin = 0.90)
+
+# Re-run Stage 2 with looser thresholds, same Stage 1 outputs
+mqcset(samplemin = 0.85)
+prep(dir = "results")
+
+# Per-call detection threshold
+betas_strict <- applymask(betas, mask = mask, detP = detP, pthresh = 0.01)
+
+# Inspect / reset
+str(mqcopts())
+mqcreset()
 ```
 
-### 6.1 Algorithm
+---
 
-When `epicv2_harmonize = TRUE` and the detected platform is EPICv2, Stage 1 performs two steps after preprocessing:
+## 6. SNP identity verification: `snpcheck()`
 
-**Step 1 — Cohort-consistent de-duplication.** For each replicated CpG (grouped by the `cg`/`ch` prefix, stripping the suffix), the per-probe **cross-sample detection failure rate** is computed (`mean(detP > detP_thresh)` across all samples). The probe with the lowest failure rate is kept; ties are broken by taking the first probe in ID order. Only `cg`/`ch` probes are de-duplicated — `rs` (SNP) and control probes are left untouched.
+Operates on `snp_betas.rds` (samples × rs probes; ~59 on EPIC/EPICv2,
+~65 on 450K).
 
-This is a **cohort-level** decision: every sample ends up using the same physical probe for a given CpG. It differs from SeSAMe's `collapseToPfx(method = "minPvalue")`, which selects per-sample and can therefore assign different replicate probes to the same CpG in different samples.
+1. NAs replaced with per-probe median (rs probes cluster at 0/0.5/1,
+   so median is a sensible imputation).
+2. Euclidean distance matrix → classical MDS to 2 dimensions.
+3. If a donor column is available, per-donor centroids are computed;
+   each sample is assigned to its nearest centroid. Samples whose
+   nearest centroid is not their reported donor are flagged.
+4. Outputs `snp_mds_coordinates.csv`, `snp_identity_flags.csv` (if
+   any), and a two-page PDF (all samples; zoomed view of flagged
+   donors).
 
-**Step 2 — Probe ID harmonization.** Because de-duplication has already removed every replicate, the surviving EPICv2 probe IDs are lifted to the target legacy platform (`EPIC` by default, or `HM450`) with SeSAMe's `mLiftOver`. With no replicates left to collapse, this step only renames probe IDs. The conversion mappings are the ones shipped in the `sesameData` cache (no external file, no bundled data).
-
-A per-CpG kept/dropped log is written to `epicv2_dedup_log.csv` (columns: `cpg`, `kept_probe`, `kept_fail_rate`, `dropped_probes`, `n_replicates`). There is no console dump.
-
-When harmonization runs inside the pipeline, the beta, M-value, mask, and detection p-value matrices are all re-aligned to the harmonized probe set so they stay mutually consistent.
-
-### 6.2 Standalone function
-
-`harmonize_epicv2()` applies the same de-duplication + harmonization to matrices you already have:
+Signature:
 
 ```r
-harmonized <- harmonize_epicv2(
-  mat_path        = "results/betas_all.rds",   # beta OR M-value matrix
-  detP_path       = "results/detP_all.rds",    # detection p-value matrix
-  target_platform = "EPIC",                    # or "HM450"
-  dedup_log_path  = "results/epicv2_dedup_log.csv")
+snpcheck(rsbetas,
+         ss       = NULL,
+         donorcol = NULL,
+         outdir   = ".",
+         width    = 12, height = 10,
+         logger   = NULL)
 ```
 
-**Input format.** `mat` and `detP` are matrices with **probes in rows, samples in columns**, EPICv2 probe IDs as row names. The detection p-value matrix is **required** — the de-duplication criterion is the cross-sample detection failure rate, which cannot be recovered from an unmasked beta matrix. Both inputs are exactly what Stage 1 writes. To generate them directly from SeSAMe:
+`rsbetas` may be a matrix or a path to `snp_betas.rds`.
 
-```r
-library(sesame)
-sdfs  <- openSesame(idat_dir, prep = "QCDP", func = NULL)   # list of SigDFs
-betas <- do.call(cbind, lapply(sdfs, getBetas, mask = FALSE))
-detP  <- do.call(cbind, lapply(sdfs, pOOBAH, return.pval = TRUE))
-```
+---
 
-### 6.3 Interaction with the Horvath clock
+## 7. Design rationale
 
-Harmonizing EPICv2 IDs to EPIC means the hard-coded 353-CpG Horvath clock applies directly, without the per-platform model variants that would otherwise be needed for EPICv2's renamed probes. Clock CpGs genuinely absent from the platform are still handled by zero-shot reference imputation (§2.5).
+**Raw matrices + separate masks.** Signal and QC are decoupled.
+Different downstream analyses need different masks; baking them into
+`betas_all.rds` would force one choice on everyone.
 
-## 7. SNP identity verification (`check_snp_identity()`)
+**Flag, don't filter.** v1.x wrote exclusion CSVs that looked
+authoritative but were advisory; users either ignored them or treated
+them as gospel. v2.0.0 produces no exclusion lists by default. The
+only sample-level exclusion utility (`flagsamples()`) is opt-in and
+explicit in what it does. The only place exclusion actually happens
+is `applymask()`, which takes IDs the user provides.
 
-Uses rs probes (auto-detected; 59 on EPIC/EPICv2, 65 on HM450). MDS on Euclidean distances of continuous beta values (no genotype calling). Per-participant centroids → nearest-centroid flagging. This is part of the **sample identity** QC layer.
+**MDS on all probes (change from v1.x top-N).** Top-variable selection
+before MDS biases the embedding toward whatever drove that variance
+— often a batch effect. Using all complete-case probes gives a more
+faithful low-dimensional summary at modest extra cost
+(`dist(t(betas))` is the same shape regardless of probe count).
 
-## 8. Design decisions
+**PCA still uses top-N.** PCA is computationally heavier than MDS,
+and top-variable selection is the standard approach for visualising
+methylation PCA; we retain it (`ntop = 100000`).
 
-**Unmasked matrices + separate masks**: Signal and QC are decoupled. Users apply their own thresholds.
+**PC vs associated variable, not PC-vs-PC scatter.** Six PC-vs-PC
+scatter plots tell you the shape of variation. PC-vs-variable plots
+tell you what each axis means. Six panels on one page also fit a
+single sheet (2×3 via `gridExtra::grid.arrange`).
 
-**Flag, don't filter**: Exclusion lists are advisory.
+**Tail-only probe-failure histogram (new in v2.0.0).** Plotting the
+full per-probe failure distribution is dominated by the spike near
+0% and tells you nothing. The tail is the diagnostic part. The total
+omitted at ~0% is reported in the subtitle and the tail probes are
+exported as CSV.
 
-**Quality vs. identity QC are separate**: A swapped sample can be high quality; folding identity checks into the quality flag would hide real swaps. The two layers are reported independently.
+**Intensity plot precedence (MDS > low-intensity > OK).** MDS
+outliers warrant the strongest signal regardless of intensity.
+Showing a sample as "low intensity" when it is also an MDS outlier
+would understate the problem.
 
-**QCDPB with P before B**: detection p-values are computed pre-noob (correct null distribution), while betas/M-values are noob-corrected.
+**Beta density built from scratch.** v1.x's README claimed this plot
+existed but no code produced it. v2.0.0 actually computes it
+(`density(x, from = 0, to = 1, n = 512)` per sample on cg/ch probes,
+overlaid lines coloured by low-intensity flag).
 
-**Sex probes separate from probe_types**: `exclude_sex` (default TRUE) handles sex chromosomes independently. Sex probes are cg probes — without this parameter they'd be indistinguishable from autosomal cg probes.
+**Hardcoded Horvath clock and sex probe lists.** Avoids silent
+failures when the SeSAMe data cache is unavailable.
 
-**Intensity-based sex inference on non-noob signal**: Uses curated non-cross-hybridizing, non-PAR probe sets with a data-driven threshold. noob cannot recover weak signal, so non-noob intensities are used.
+**Intensity-based sex inference with regression bands.** Robust to
+batch-to-batch shifts in absolute intensity because the bands adapt
+to the data; transparently visualised.
 
-**Cohort-consistent EPICv2 de-duplication**: Replicate selection is a cohort-level decision (cross-sample detection failure), so every sample uses the same physical probe per CpG.
+**Optional imputation.** Chunked k-NN via
+`applymask(..., impute = TRUE)`. Chunking is essential at EPIC scale.
 
-**Similarity-based k-NN imputation**: Neighbours are ranked on the most-variable probes, where "nearest" is meaningful. No constant fallback — unimputable values stay NA.
+**No batch correction.** Analysis-specific. PCA panel (page 9) helps
+identify whether batch variables associate with the leading PCs.
 
-**No silent package installation**: `check_dependencies()` reports problems and the exact fix command; nothing is installed automatically (CRAN/Bioconductor policy, and safe on no-admin/HPC environments).
+**Short user-facing names; internals keep underscores.** A user typing
+`applymask` repeatedly benefits from one token. Internal helpers
+(`resolve_column`, `normalize_sex`, `predict_horvath_age`,
+`parse_age_robust`, `geometric_median`, …) keep underscores because
+they are referenced by other internals and clarity inside the codebase
+matters more than typing speed.
 
-**No batch correction**: Analysis-specific. PCA plots help assess.
+---
 
-**Hardcoded Horvath clock and sex probe lists**: Avoids silent failures from missing SeSAMe cache data.
+## 8. References
 
-## 9. References
-
-1. Zhou W, Laird PW, Snyder M. *Nucleic Acids Research*. 2018;46(20):e123.
-2. Zhou W, et al. mLiftOver: harmonizing data across Infinium DNA methylation platforms. *Bioinformatics*. 2024;40(7):btae423.
-3. Horvath S. *Genome Biology*. 2013;14(10):R115.
-4. Teschendorff AE, et al. *BMC Bioinformatics*. 2017;18(1):105.
-5. Carrel L, Willard HF. *Nature*. 2005;434(7031):400–404.
-6. Cotton AM, et al. *Genome Research*. 2015;25(8):1091–1099.
-7. Guintivano J, Aryee MJ, Kaminsky ZA. *Epigenetics*. 2013;8(3):290–302.
+1. Zhou W, Triche TJ, Laird PW, Shen H. *SeSAMe: reducing artifactual
+   detection of DNA methylation by Infinium BeadChips in genomic
+   deletions*. Nucleic Acids Research. 2018;46(20):e123.
+2. Triche TJ, Weisenberger DJ, Van Den Berg D, Laird PW, Siegmund KD.
+   *Low-level processing of Illumina Infinium DNA Methylation
+   BeadArrays*. Nucleic Acids Research. 2013;41(7):e90. (NOOB.)
+3. Horvath S. *DNA methylation age of human tissues and cell types*.
+   Genome Biology. 2013;14(10):R115.
+4. Teschendorff AE, Breeze CE, Zheng SC, Beck S. *A comparison of
+   reference-based algorithms for correcting cell-type heterogeneity
+   in Epigenome-Wide Association Studies*. BMC Bioinformatics.
+   2017;18(1):105. (EpiDISH RPC.)
+5. Carrel L, Willard HF. *X-inactivation profile reveals extensive
+   variability in X-linked gene expression in females*. Nature.
+   2005;434(7031):400–404.
+6. Cotton AM, Price EM, Jones MJ, Balaton BP, Kobor MS, Brown CJ.
+   *Landscape of DNA methylation on the X chromosome reflects CpG
+   density, functional chromatin state and X-chromosome inactivation*.
+   Genome Research. 2015;25(8):1091–1099.
+7. Guintivano J, Aryee MJ, Kaminsky ZA. *A cell epigenotype specific
+   model for the correction of brain cellular heterogeneity bias and
+   its application to age, brain region and major depression*.
+   Epigenetics. 2013;8(3):290–302.
