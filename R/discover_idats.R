@@ -1,250 +1,126 @@
 ###############################################################################
 # discover_idats.R — IDAT file discovery and sample sheet parsing
 #
-# The user supplies a single top-level directory. All IDAT discovery
-# and all sample-sheet discovery are confined to that directory tree.
+# Recursively scans a directory tree for paired IDAT files (_Grn.idat /
+# _Red.idat). For each subdirectory containing IDATs:
+#   1. Searches for a sample sheet matching a configurable pattern
+#   2. If found, reads it (auto-detecting tab vs. comma delimiters)
+#   3. If not found, synthesizes a minimal sheet from IDAT filenames
+#   4. Detects the array platform by reading the first IDAT header
 #
-# Workflow:
-#   1. Recursively find every IDAT pair (_Grn.idat / _Red.idat) under
-#      the root.
-#   2. Recursively find every sample sheet under the root and read them
-#      all (auto-detecting tab vs. comma delimiters).
-#   3. Concatenate the sheets, taking the union of their columns and
-#      filling absent columns with NA.
-#   4. Reconcile sheet rows against the IDATs actually on disk:
-#        - IDATs present on disk but absent from every sheet: a minimal
-#          row is synthesized and appended (not written back to disk).
-#        - Rows in a sheet whose IDATs are missing on disk: a WARNING is
-#          emitted and the row is dropped.
-#      A mismatch is always a warning, never an error.
-#   5. Resolve duplicate sample IDs: when one sample_id appears in more
-#      than one sheet row, the row with the most non-missing values is
-#      kept (ties -> first occurrence) and a WARNING naming the
-#      sample_id and the sheet file(s) is emitted.
-#   6. Detect the array platform from IDAT headers and decompose the
-#      Sentrix ID into Chip/Row/Col.
+# Sample sheet columns are resolved flexibly:
+#   - Basename from: Basename, Fname, Sentrix_ID+Position, or Grn column
+#   - Sex/Age/Cell via resolve_column() with configurable aliases
+#
+# After assembly, Sentrix IDs are decomposed into Chip/Row/Col for
+# downstream batch association analysis in PCA.
 ###############################################################################
-
-#' Discover IDAT files and sample sheets under a single root directory
+#' Discover IDAT files and optional sample sheets in nested folders
 #'
-#' @param idat_root Top-level directory. IDATs and sample sheets are
-#'   searched for recursively, confined to this tree.
-#' @param sample_sheet_pattern Regex for sheet filenames; NULL to skip
-#'   sheet discovery entirely (all rows synthesized).
-#' @param basename_col Preferred basename column name.
-#' @param expected_platform Optional platform string for a cross-folder
-#'   sanity check (mismatch is a warning).
+#' Walks \code{dir} recursively, reads or synthesises a sample sheet per
+#' folder, detects the array platform from IDAT headers, and decomposes
+#' each basename into \code{Chip}, \code{Row}, and \code{Col} columns.
+#'
+#' @param dir Top-level directory.
+#' @param sheetpattern Regex for sheet filenames; \code{NULL} to skip.
+#'   Default: \code{sheetpattern} option.
+#' @param basecol Preferred basename column name. Default: \code{basecol}
+#'   option.
+#' @param platform Optional platform string for a cross-folder consistency
+#'   check.
 #' @param logger Optional logger.
-#' @return A data.frame with at least Basename, sample_id, batch_folder,
-#'   sheet_path, detected_platform, Chip, Row, Col.
+#' @return A data.frame with at least \code{Basename}, \code{sample_id},
+#'   \code{batch_folder}, \code{sheet_path}, \code{detected_platform},
+#'   \code{Chip}, \code{Row}, \code{Col}.
 #' @export
-discover_idats <- function(idat_root,
-                           sample_sheet_pattern = NULL,
-                           basename_col = NULL,
-                           expected_platform = NULL,
-                           logger = NULL) {
-  cfg <- methylQC_options()
-  if (is.null(sample_sheet_pattern)) sample_sheet_pattern <- cfg$sample_sheet_pattern
-  if (is.null(basename_col))         basename_col         <- cfg$basename_col
-  stopifnot(dir.exists(idat_root))
-  loginfo <- function(...) if (!is.null(logger)) logger$log("discover", sprintf(...))
+discover <- function(dir,
+                     sheetpattern = NULL,
+                     basecol = NULL,
+                     platform = NULL,
+                     logger = NULL) {
+  cfg <- mqcopts()
+  if (is.null(sheetpattern)) sheetpattern <- cfg$sheetpattern
+  if (is.null(basecol))      basecol      <- cfg$basecol
+  stopifnot(dir.exists(dir))
 
-  # --- 1. Find every IDAT pair under the root ---
-  all_grn <- list.files(idat_root, pattern = "_Grn\\.idat$",
+  # Find all Green channel IDATs recursively
+  all_grn <- list.files(dir, pattern = "_Grn\\.idat$",
                         recursive = TRUE, full.names = TRUE,
                         ignore.case = TRUE)
   if (!length(all_grn)) {
-    stop("No IDAT files (*_Grn.idat) found under ", idat_root)
+    stop("No IDAT files (*_Grn.idat) found under ", dir)
   }
-  all_bn <- sub("_Grn\\.idat$", "", all_grn, ignore.case = TRUE)
-  red_exists <- file.exists(paste0(all_bn, "_Red.idat"))
-  if (any(!red_exists)) {
-    loginfo("%d IDAT(s) have a Grn file but no matching Red file - skipped",
-            sum(!red_exists))
-    all_bn <- all_bn[red_exists]
+  idat_dirs <- unique(dirname(all_grn))
+  if (!is.null(logger)) {
+    logger$log("discover",
+               sprintf("found %d IDAT pair(s) across %d folder(s)",
+                       length(all_grn), length(idat_dirs)))
   }
-  disk <- data.frame(
-    Basename     = all_bn,
-    sample_id    = basename(all_bn),
-    batch_folder = basename(dirname(all_bn)),
-    stringsAsFactors = FALSE)
-  idat_dirs <- unique(dirname(all_bn))
-  loginfo("found %d IDAT pair(s) across %d folder(s)",
-          nrow(disk), length(idat_dirs))
 
-  # --- 2. Find and read every sample sheet under the root ---
-  sheets <- list()
-  if (!is.null(sample_sheet_pattern)) {
-    sheet_paths <- list.files(idat_root, pattern = sample_sheet_pattern,
-                              recursive = TRUE, full.names = TRUE,
-                              ignore.case = TRUE)
-    for (sp in sheet_paths) {
-      df <- tryCatch(read_one_sheet(sp, basename_col, logger),
-                     error = function(e) {
-                       warning(sprintf("Could not read sample sheet '%s': %s",
-                                        sp, conditionMessage(e)), call. = FALSE)
-                       NULL
-                     })
-      if (!is.null(df) && nrow(df) > 0) sheets[[sp]] <- df
+  # Process each folder independently: read/synthesize sheet + detect platform
+  per_folder <- lapply(idat_dirs, function(folder) {
+    df <- read_or_synthesize_sheet(folder, sheetpattern, basecol, logger)
+    df$batch_folder <- basename(folder)
+    detected <- detect_platform_from_folder(folder, logger)
+    df$detected_platform <- detected
+    if (!is.null(platform) && !is.na(detected) && detected != platform) {
+      stop(sprintf("Platform mismatch in '%s': detected %s, expected %s",
+                   folder, detected, platform))
     }
-    loginfo("read %d sample sheet(s)", length(sheets))
+    df
+  })
+
+  detected_platforms <- unique(unlist(lapply(per_folder,
+                                             function(d) d$detected_platform)))
+  detected_platforms <- detected_platforms[!is.na(detected_platforms)]
+  if (length(detected_platforms) > 1) {
+    stop("Inconsistent platforms across folders: ",
+         paste(detected_platforms, collapse = ", "))
+  }
+  if (!is.null(logger) && length(detected_platforms) == 1) {
+    logger$log("discover",
+               sprintf("detected platform: %s (consistent across all folders)",
+                       detected_platforms))
   }
 
-  # --- 3. Concatenate sheets with a column union ---
-  sheet_all <- if (length(sheets)) {
-    all_cols <- unique(unlist(lapply(sheets, colnames)))
-    sheets <- lapply(sheets, function(d) {
-      for (m in setdiff(all_cols, colnames(d))) d[[m]] <- NA
-      d[, all_cols, drop = FALSE]
-    })
-    do.call(rbind, sheets)
-  } else {
-    data.frame(Basename = character(0), sample_id = character(0),
-               sheet_path = character(0), stringsAsFactors = FALSE)
+  # Harmonise columns across folders (sheets may differ in columns)
+  all_cols <- unique(unlist(lapply(per_folder, colnames)))
+  per_folder <- lapply(per_folder, function(d) {
+    for (m in setdiff(all_cols, colnames(d))) d[[m]] <- NA
+    d[, all_cols]
+  })
+  ss <- do.call(rbind, per_folder)
+
+  # Verify that both Green and Red IDATs exist for each sample
+  grn_ok <- file.exists(paste0(ss$Basename, "_Grn.idat"))
+  red_ok <- file.exists(paste0(ss$Basename, "_Red.idat"))
+  ok <- grn_ok & red_ok
+  if (any(!ok) && !is.null(logger)) {
+    logger$log("discover",
+               sprintf("dropping %d row(s) with missing IDATs", sum(!ok)))
+  }
+  ss <- ss[ok, , drop = FALSE]
+
+  # Disambiguate duplicate sample IDs across batches
+  dups <- ss$sample_id[duplicated(ss$sample_id)]
+  if (length(dups)) {
+    ss$sample_id <- ifelse(ss$sample_id %in% dups,
+                           paste(ss$batch_folder, ss$sample_id, sep = "__"),
+                           ss$sample_id)
   }
 
-  # --- 4. Reconcile sheet rows against IDATs on disk ---
-  # 4a. Sheet rows whose IDATs are missing on disk -> warn + drop
-  if (nrow(sheet_all) > 0) {
-    on_disk <- sheet_all$sample_id %in% disk$sample_id
-    if (any(!on_disk)) {
-      missing_ids <- sheet_all$sample_id[!on_disk]
-      warning(sprintf(paste0(
-        "%d sample(s) listed in sample sheet(s) have no IDAT files on ",
-        "disk and were dropped: %s"),
-        length(missing_ids),
-        paste(utils::head(missing_ids, 20), collapse = ", ")),
-        call. = FALSE)
-      loginfo("%d sheet row(s) dropped: IDATs not found on disk",
-              sum(!on_disk))
-      sheet_all <- sheet_all[on_disk, , drop = FALSE]
-    }
-  }
-
-  # 4b. Resolve duplicate sample IDs within the sheets
-  if (nrow(sheet_all) > 0 && anyDuplicated(sheet_all$sample_id)) {
-    sheet_all <- resolve_duplicate_rows(sheet_all, logger)
-  }
-
-  # 4c. IDATs on disk absent from every sheet -> synthesize rows
-  matched <- disk$sample_id %in% sheet_all$sample_id
-  ss <- sheet_all
-  if (any(!matched)) {
-    extra <- disk[!matched, , drop = FALSE]
-    extra$sheet_path <- NA_character_
-    loginfo("%d IDAT(s) not listed in any sheet - synthesizing rows",
-            nrow(extra))
-    if (nrow(ss) > 0) {
-      for (m in setdiff(colnames(ss), colnames(extra))) extra[[m]] <- NA
-      for (m in setdiff(colnames(extra), colnames(ss)))  ss[[m]]    <- NA
-      extra <- extra[, colnames(ss), drop = FALSE]
-      ss <- rbind(ss, extra)
-    } else {
-      ss <- extra
-    }
-  }
-
-  # Attach authoritative Basename / batch_folder from disk
-  di <- match(ss$sample_id, disk$sample_id)
-  ss$Basename     <- disk$Basename[di]
-  ss$batch_folder <- disk$batch_folder[di]
-  if (!"sheet_path" %in% colnames(ss)) ss$sheet_path <- NA_character_
-
-  # --- 5. Detect platform per folder ---
-  plat_by_dir <- vapply(idat_dirs, function(d)
-    detect_platform_from_folder(d, logger), character(1))
-  names(plat_by_dir) <- basename(idat_dirs)
-  ss$detected_platform <- plat_by_dir[ss$batch_folder]
-
-  detected <- unique(stats::na.omit(ss$detected_platform))
-  if (length(detected) > 1) {
-    warning("Inconsistent platforms detected across folders: ",
-            paste(detected, collapse = ", "),
-            ". Proceeding with the most common one.", call. = FALSE)
-    detected <- names(sort(table(ss$detected_platform), decreasing = TRUE))[1]
-  }
-  if (length(detected) == 1) {
-    loginfo("detected platform: %s", detected)
-    if (!is.null(expected_platform) && detected != expected_platform) {
-      warning(sprintf("Detected platform '%s' differs from expected '%s'.",
-                      detected, expected_platform), call. = FALSE)
-    }
-  }
-
-  # --- 6. Decompose Sentrix ID into Chip/Row/Col ---
+  # Decompose basename into Chip/Row/Col
   ss <- decompose_basename(ss, logger = logger)
 
-  by_batch <- table(ss$batch_folder)
-  loginfo("final: %d samples across %d batch(es) (%s)",
-          nrow(ss), length(by_batch),
-          paste(names(by_batch), by_batch, sep = "=", collapse = "; "))
+  if (!is.null(logger)) {
+    by_batch <- table(ss$batch_folder)
+    logger$log("discover",
+               sprintf("final: %d samples across %d batches (%s)",
+                       nrow(ss), length(by_batch),
+                       paste(names(by_batch), by_batch,
+                             sep = "=", collapse = "; ")))
+  }
   ss
-}
-
-#' Resolve duplicate sample IDs by keeping the most complete row
-#'
-#' When a sample_id appears more than once, keep the row with the most
-#' non-missing values (ties -> first occurrence). Warn, naming the
-#' sample_id and the source sheet file(s).
-#' @keywords internal
-#' @noRd
-resolve_duplicate_rows <- function(sheet_all, logger = NULL) {
-  dup_ids <- unique(sheet_all$sample_id[duplicated(sheet_all$sample_id)])
-  keep <- rep(TRUE, nrow(sheet_all))
-  for (sid in dup_ids) {
-    idx <- which(sheet_all$sample_id == sid)
-    completeness <- vapply(idx, function(i)
-      sum(!is.na(unlist(sheet_all[i, , drop = TRUE]))), integer(1))
-    winner <- idx[which.max(completeness)]   # which.max -> first on ties
-    losers <- setdiff(idx, winner)
-    keep[losers] <- FALSE
-    sheet_files <- unique(stats::na.omit(sheet_all$sheet_path[idx]))
-    warning(sprintf(paste0(
-      "Duplicate sample_id '%s' found in %d sheet rows (%s); kept the ",
-      "most complete row, dropped %d."),
-      sid, length(idx),
-      paste(basename(sheet_files), collapse = ", "), length(losers)),
-      call. = FALSE)
-  }
-  if (!is.null(logger)) {
-    logger$log("discover",
-               sprintf("resolved %d duplicate sample_id(s)", length(dup_ids)))
-  }
-  sheet_all[keep, , drop = FALSE]
-}
-
-#' Read a single sample sheet and resolve its Basename column
-#' @keywords internal
-#' @noRd
-read_one_sheet <- function(sheet_path, basename_col, logger = NULL) {
-  df <- read_sheet_autodelim(sheet_path)
-  folder <- dirname(sheet_path)
-
-  if (basename_col %in% colnames(df)) {
-    bn <- df[[basename_col]]
-    df$Basename <- ifelse(startsWith(bn, "/") | grepl("^[A-Za-z]:", bn),
-                          bn, file.path(folder, bn))
-  } else if ("Fname" %in% colnames(df)) {
-    df$Basename <- file.path(folder, df$Fname)
-  } else if (all(c("Sentrix_ID", "Sentrix_Position") %in% colnames(df))) {
-    df$Basename <- file.path(folder,
-                             paste0(df$Sentrix_ID, "_", df$Sentrix_Position))
-  } else if ("Grn" %in% colnames(df)) {
-    bn <- sub("_Grn\\.idat$", "", df$Grn, ignore.case = TRUE)
-    df$Basename <- file.path(folder, bn)
-  } else {
-    stop("no recognized basename column (Basename / Fname / ",
-         "Sentrix_ID+Position / Grn)")
-  }
-
-  df$sample_id  <- basename(df$Basename)
-  df$sheet_path <- sheet_path
-  if (!is.null(logger)) {
-    logger$log("discover",
-               sprintf("read sheet %s (%d rows)",
-                       basename(sheet_path), nrow(df)))
-  }
-  df
 }
 
 #' Decompose sample_id (Sentrix) into Chip/Row/Col
@@ -262,15 +138,15 @@ decompose_basename <- function(ss, logger = NULL) {
   ss$Col  <- vapply(parts, function(p) if (length(p) >= 4) p[4] else NA_character_,
                     character(1))
 
+  n_decomposed <- sum(!is.na(ss$Chip))
   if (!is.null(logger)) {
     logger$log("discover",
                sprintf("decomposed Sentrix: %d / %d samples -> Chip/Row/Col",
-                       sum(!is.na(ss$Chip)), nrow(ss)))
+                       n_decomposed, nrow(ss)))
   }
   ss
 }
 
-#' Detect array platform by reading the first IDAT header in a folder
 #' @keywords internal
 #' @noRd
 detect_platform_from_folder <- function(folder, logger = NULL) {
@@ -305,7 +181,52 @@ detect_platform_from_folder <- function(folder, logger = NULL) {
   platform
 }
 
-#' Auto-detect tab vs. comma delimiter and read a sample sheet
+#' @keywords internal
+#' @noRd
+read_or_synthesize_sheet <- function(folder, pattern, basecol, logger) {
+  sheet_path <- find_sample_sheet(folder, pattern)
+  if (is.null(sheet_path)) {
+    grn <- list.files(folder, pattern = "_Grn\\.idat$",
+                      ignore.case = TRUE, full.names = TRUE)
+    bn  <- sub("_Grn\\.idat$", "", grn, ignore.case = TRUE)
+    if (!is.null(logger)) {
+      logger$log("discover",
+                 sprintf("no sheet in %s -- synthesising from %d IDAT pairs",
+                         basename(folder), length(bn)))
+    }
+    return(data.frame(Basename = bn, sample_id = basename(bn),
+                      sheet_path = NA_character_,
+                      stringsAsFactors = FALSE))
+  }
+  df <- read_sheet_autodelim(sheet_path)
+
+  # Resolve the IDAT basename from whichever column is available
+  if (basecol %in% colnames(df)) {
+    bn <- df[[basecol]]
+    df$Basename <- ifelse(startsWith(bn, "/") | grepl("^[A-Za-z]:", bn),
+                          bn, file.path(folder, bn))
+  } else if ("Fname" %in% colnames(df)) {
+    df$Basename <- file.path(folder, df$Fname)
+  } else if (all(c("Sentrix_ID", "Sentrix_Position") %in% colnames(df))) {
+    df$Basename <- file.path(folder,
+                             paste0(df$Sentrix_ID, "_", df$Sentrix_Position))
+  } else if ("Grn" %in% colnames(df)) {
+    bn <- sub("_Grn\\.idat$", "", df$Grn, ignore.case = TRUE)
+    df$Basename <- file.path(folder, bn)
+  } else {
+    stop("Sample sheet ", sheet_path, " lacks any recognised basename column.")
+  }
+
+  df$sample_id  <- basename(df$Basename)
+  df$sheet_path <- sheet_path
+  if (!is.null(logger)) {
+    logger$log("discover",
+               sprintf("read sheet %s (%d rows)",
+                       basename(sheet_path), nrow(df)))
+  }
+  df
+}
+
 #' @keywords internal
 #' @noRd
 read_sheet_autodelim <- function(path) {
@@ -316,4 +237,19 @@ read_sheet_autodelim <- function(path) {
   utils::read.table(path, header = TRUE, sep = sep,
                     stringsAsFactors = FALSE,
                     check.names = FALSE, na.strings = c("", "NA"))
+}
+
+#' @keywords internal
+#' @noRd
+find_sample_sheet <- function(folder, pattern) {
+  if (is.null(pattern)) return(NULL)
+  hits <- list.files(folder, pattern = pattern,
+                     ignore.case = TRUE, full.names = TRUE)
+  hits <- hits[dirname(hits) == folder]
+  if (length(hits) == 0) return(NULL)
+  if (length(hits) > 1) {
+    stop("Multiple files matching sample sheet pattern in ", folder, ": ",
+         paste(basename(hits), collapse = ", "))
+  }
+  hits[1]
 }

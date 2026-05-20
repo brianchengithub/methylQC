@@ -2,9 +2,11 @@
 # Run devtools::document() in an R session to regenerate from roxygen tags.
 
 export(applymask)
+export(checkdeps)
 export(checkmeta)
 export(discover)
 export(flagsamples)
+export(liftv2)
 export(logcapture)
 export(makelog)
 export(mqcdefaults)

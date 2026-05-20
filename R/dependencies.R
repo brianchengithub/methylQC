@@ -3,20 +3,20 @@
 #
 # methylQC does not silently install or update packages: doing so is
 # invasive, breaks on no-admin / HPC environments, and is disallowed by
-# CRAN/Bioconductor policy. Instead, check_dependencies() verifies that
-# the required packages are present at adequate versions and prints the
+# CRAN/Bioconductor policy. Instead, checkdeps() verifies that the
+# required packages are present at adequate versions and prints the
 # exact install command for anything missing or stale.
 ###############################################################################
 
 #' Minimum required versions for key dependencies
 #' @keywords internal
 #' @noRd
-.methylQC_min_versions <- list(
+.methylqc_min_versions <- list(
   sesame     = "1.20.0",
   sesameData = "1.20.0",
   EpiDISH    = "2.18.0",
   ggplot2    = "3.4.0",
-  matrixStats= "0.62.0"
+  matrixStats = "0.62.0"
 )
 
 #' Verify the methylQC runtime environment
@@ -26,12 +26,12 @@
 #' panel. Prints a report and, for anything missing or out of date, the
 #' exact command to fix it. Nothing is installed automatically.
 #'
-#' @param quiet If TRUE, suppress the printed report and only return
-#'   the status list invisibly.
+#' @param quiet If TRUE, suppress the printed report and only return the
+#'   status list invisibly.
 #' @return Invisibly, a list with elements \code{ok} (logical) and
 #'   \code{problems} (character vector).
 #' @export
-check_dependencies <- function(quiet = FALSE) {
+checkdeps <- function(quiet = FALSE) {
   problems <- character(0)
   note <- function(...) if (!quiet) message(...)
 
@@ -46,8 +46,8 @@ check_dependencies <- function(quiet = FALSE) {
   }
 
   # --- Required packages + versions ---
-  for (pkg in names(.methylQC_min_versions)) {
-    minv <- .methylQC_min_versions[[pkg]]
+  for (pkg in names(.methylqc_min_versions)) {
+    minv <- .methylqc_min_versions[[pkg]]
     if (!requireNamespace(pkg, quietly = TRUE)) {
       note(sprintf("  %-12s MISSING (need >= %s)", pkg, minv))
       problems <- c(problems, sprintf(
@@ -85,7 +85,7 @@ check_dependencies <- function(quiet = FALSE) {
 
   # --- Default EpiDISH reference panel ---
   if (requireNamespace("EpiDISH", quietly = TRUE)) {
-    ref <- methylQC_options()$epidish_reference
+    ref <- mqcopts()$dishref
     ref1 <- ref[1]
     ref_ok <- tryCatch({
       e <- new.env()
