@@ -1,6 +1,4 @@
-methylQC
-
-
+# methylQC
 
 **QC and preprocessing pipeline for Illumina DNA methylation arrays.**
 
@@ -13,6 +11,9 @@ The pipeline outputs **raw (unmasked) matrices** alongside a quality
 mask and detection p-values; nothing is excluded automatically.
 `applymask()` is the single function that turns those matrices into a
 filtered analysis matrix, on the user's terms.
+
+![methylQC Overview](https://github.com/brianchengithub/methylQC/blob/main/overview.svg)
+
 
 ## Features
 
