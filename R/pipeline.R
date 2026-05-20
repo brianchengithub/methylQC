@@ -20,7 +20,7 @@
 #
 # There is no exclude_samples.csv, exclude_probes.csv, or
 # probe_call_rates.csv. The user applies their own exclusion criteria
-# via applymask() and flagsamples().
+# via cleanmat() and flagsamples().
 ###############################################################################
 
 #' Stage 1: Preprocessing and QC metric computation
@@ -105,7 +105,7 @@ qc <- function(indir, outdir, platform = NULL, ...) {
 #' Produces QC plots, optional EpiDISH cell-type proportions, and a
 #' consolidated sample sheet. Performs NO automatic sample or probe
 #' exclusion: only flag columns are written. The user applies exclusion
-#' criteria downstream via \code{\link{applymask}}.
+#' criteria downstream via \code{\link{cleanmat}}.
 #'
 #' @param celltype Cell-type label for this slice.
 #' @param betas Beta matrix (probes x samples) for this slice.
@@ -146,7 +146,7 @@ prepcell <- function(celltype, betas, mvals, ss, platform, outdir,
   # --- Masked beta matrix for the scree/PCA panels ---
   # Apply quality mask + detection p-value mask, restrict to cg/ch probes.
   # No imputation (PCA panel handles complete.cases internally).
-  betasok <- applymask(betas, mask = mask, detP = detP,
+  betasok <- cleanmat(betas, mask = mask, detP = detP,
                        pthresh = cfg$detp,
                        probes = c("cg", "ch"),
                        platform = platform,

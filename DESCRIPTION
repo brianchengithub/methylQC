@@ -1,6 +1,6 @@
 Package: methylQC
 Title: QC and Preprocessing Pipeline for Illumina DNA Methylation Arrays
-Version: 2.0.0
+Version: 2.0.1
 Authors@R: person("Brian", "Chen", role = c("aut", "cre"),
                   email = "brianchen450k@gmail.com")
 Description: Two-stage QC pipeline for Illumina Infinium DNA methylation

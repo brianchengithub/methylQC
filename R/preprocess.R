@@ -9,7 +9,7 @@
 #   mask  — logical matrix (TRUE = probe failed quality or detection)
 #   detP  — detection p-values (pOOBAH) per probe per sample
 #
-# The user applies masks downstream via applymask().
+# The user applies masks downstream via cleanmat().
 ###############################################################################
 
 #' Run openSesame and extract unmasked betas, mask, and detection p-values

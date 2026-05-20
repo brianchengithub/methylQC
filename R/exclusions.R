@@ -9,12 +9,12 @@
 #   flagsamples() — exported. A standalone utility: given a detection p-value
 #                   matrix and a call-rate threshold, writes a CSV listing
 #                   samples below the threshold. Advisory only — the user
-#                   decides whether to feed those IDs to applymask(exclude=).
+#                   decides whether to feed those IDs to cleanmat(dropsamples=).
 #   snpbetas()    — exported. Extracts the rs (SNP) probe sub-matrix.
 #   sexprobes()   — internal. Sex-chromosome probe IDs from the manifest.
 #
 # There is no probe-exclusion table and no exclude_probes.csv. Probe-level
-# masking is carried entirely by the mask and detP matrices (see applymask()).
+# masking is carried entirely by the mask and detP matrices (see cleanmat()).
 ###############################################################################
 
 #' Per-sample QC flags for plot colouring (internal)
@@ -91,7 +91,7 @@ qcflags <- function(ss, logger = NULL) {
 #'
 #' This function performs NO automatic exclusion. It only produces a list.
 #' To act on it, the user passes the IDs themselves to
-#' \code{\link{applymask}(exclude = ...)} — either the returned vector or a
+#' \code{\link{cleanmat}(dropsamples = ...)} — either the returned vector or a
 #' CSV they assemble. \code{flagsamples()} does not accept hand-picked IDs;
 #' it flags purely on the call-rate threshold.
 #'
@@ -114,8 +114,8 @@ qcflags <- function(ss, logger = NULL) {
 #'
 #' betas <- readRDS("results/betas_all.rds")
 #' mask  <- readRDS("results/mask_all.rds")
-#' betas_clean <- applymask(betas, mask = mask, detP = detP,
-#'                          exclude = bad_ids, platform = "EPIC")
+#' betas_clean <- cleanmat(betas, mask = mask, detP = detP,
+#'                          dropsamples = bad_ids, platform = "EPIC")
 #' }
 #' @export
 flagsamples <- function(detP, callrate = NULL, pthresh = NULL,

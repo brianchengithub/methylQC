@@ -1,39 +1,3 @@
-138*1819/(255*146)
-(138/1819)*(146/1965)
-(138/393)/(146/1965)
-q()
-library(sesame)
-idathpath_muscle = "/Users/bc/Documents/molina/gestalt/Methylation/Muscle/"#
-idathpath_pbmc = "/Users/bc/Documents/molina/gestalt/Methylation/PBMC/"
-beta_muscle = openSesame(idathpath_muscle, func=getBetas, prep="CDB", BPPARM=BiocParallel::MulticoreParam(6))
-beta_muscle = openSesame(idathpath_muscle, func=getBetas, prep="CDB", BPPARAM=BiocParallel::MulticoreParam(6))
-urlpath = "https://www2.census.gov/programs-surveys/popest/datasets/2020-2022/state/asrh/sc-est2022-alldata6.csv"#
-#
-d = read.csv(url(urlpath))
-head(d)
-table(d$ORIGIN, d$RACE, exclude=NULL)
-library(readr)#
-library(dplyr)#
-library(tidyr)
-# Perform cross-tabulation#
-result <- data %>%#
-  group_by(RACE, ORIGIN) %>%#
-  summarise(Sum_POPESTIMATE2022 = sum(POPESTIMATE2022, na.rm = TRUE)) %>%#
-  spread(key = ORIGIN, value = Sum_POPESTIMATE2022)#
-#
-# Print the result#
-print(result)
-result <- d %>%#
-  group_by(RACE, ORIGIN) %>%#
-  summarise(Sum_POPESTIMATE2022 = sum(POPESTIMATE2022, na.rm = TRUE)) %>%#
-  spread(key = ORIGIN, value = Sum_POPESTIMATE2022)#
-#
-# Print the result#
-print(result)
-race <- d %>%#
-  group_by(RACE, STATE) %>%#
-  summarise(Sum_POPESTIMATE2022 = sum(POPESTIMATE2022, na.rm = TRUE)) %>%#
-  ungroup()
 print(race)
 # Perform cross-tabulation and filter for RACE == 2#
 black <- a %>%#
@@ -2213,17 +2177,70 @@ installed.packages("EpiDISH")["packageName", "Version"]
 library(EpiDISH)
 installed.packages("EpiDISH")["packageName", "Version"]
 installed.packages()["EpiDISH", "Version"]
-setwd("/Users/bc/Documents/GitHub/methylQC")#
+library(methylQC)
+prep(stage1_dir = "/Users/bc/Documents/gestalt/analysis/qc/Muscle/")
 devtools::document()
-devtools::load_all()
-check_dependencies()
-# matrixStats::rowVars — used by the new imputer#
-m <- matrix(runif(100*5), 100, 5, dimnames=list(paste0("cg",1:100), paste0("S",1:5)))#
-m[sample(500, 20)] <- NA#
-methylQC:::impute_knn_similarity(m, k=3L, n_var_probes=50L)   # should fill NAs, no error#
+library(methylQC)
+devtools::document()
+setwd("/Users/bc/Documents/GitHub/methylQC/")
+devtools::document()
+pak::pak("brianchengithub/methylQC")
+R.version.string
+rm(list=ls())
+# In a fresh R session#
+tmp <- tempfile()#
+download.file(#
+  "https://github.com/brianchengithub/methylQC/archive/refs/heads/main.tar.gz",#
+  tmp#
+)#
+untar(tmp, exdir = tempdir())#
+pkg_dir <- file.path(tempdir(), #
+  list.files(tempdir(), pattern = "^methylQC"))#
+# Try sourcing each .R file directly into a fresh env#
+e <- new.env()#
+for (f in list.files(file.path(pkg_dir, "R"), #
+                     "\\.R$", full.names = TRUE)) {#
+  cat("---", basename(f), "---\n")#
+  res <- tryCatch(sys.source(f, envir = e), error = function(x) x)#
+  if (inherits(res, "error")) {#
+    cat("ERROR:", conditionMessage(res), "\n")#
+  } else {#
+    cat("OK\n")#
+  }#
+}#
+# Then check which of the 9 'failing' functions are defined#
+for (fn in c("checkmeta","discover","logcapture","makelog",#
+             "qcmetrics","qcstream","rundish","runsesame","snpcheck")) {#
+  cat(sprintf("  %s : %s\n", fn, exists(fn, envir = e, inherits = FALSE)))#
+}
+pak::pak("brianchengithub/methylQC")
+tmp <- tempfile()#
+download.file(#
+  "https://github.com/brianchengithub/methylQC/archive/refs/heads/main.tar.gz", tmp)#
+untar(tmp, exdir = tempdir())#
+pkg_dir <- file.path(tempdir(),#
+  list.files(tempdir(), pattern = "^methylQC"))#
 #
-# sesame::mLiftOver — only if you plan to use EPICv2 harmonization#
-# (skip if your data is all EPIC)
-qc(in_dir  = "/Users/bc/Documents/gestalt/idats/BM/PH4",#
-   out_dir = "/Users/bc/Documents/gestalt/analysis/qc/test_v1.2.0")
-prep(stage1_dir = "/Users/bc/Documents/gestalt/analysis/qc/test_v1.2.0")
+# Show the first top-level function definition in each failing file#
+for (f in c("logging.R","epidish.R","preprocess.R",#
+            "discover_idats.R","snp_identity.R","qc_metrics.R")) {#
+  cat("---", f, "---\n")#
+  lines <- readLines(file.path(pkg_dir, "R", f))#
+  first_fn <- grep("^[a-zA-Z_.][a-zA-Z_0-9.]* <- function", lines, value = TRUE)#
+  cat(head(first_fn, 3), sep = "\n")#
+  cat("\n")#
+}
+cat(readLines(file.path(pkg_dir, "R", "dependencies.R"), n = 30), sep = "\n")#
+cat("\n--- epicv2.R ---\n")#
+cat(readLines(file.path(pkg_dir, "R", "epicv2.R"), n = 30), sep = "\n")
+setwd("/Users/bc/Documents/GitHub/methylQC/")
+devtools::document()
+pak::pak("brianchengithub/methylQC")
+library(methylQC)
+# Muscle#
+result = pipeline(#
+ in_dir = "/Users/bc/Documents/gestalt/idats/Muscle",#
+ out_dir = "/Users/bc/Documents/gestalt/analysis/qc/Muscle"#
+)
+pipeline(indir="/Users/bc/Documents/gestalt/idats/Muscle/PH4", outdir="/Users/bc/Documents/gestalt/analysis/qc/test")
+pipeline(indir="/Users/bc/Documents/gestalt/idats/BM", outdir="/Users/bc/Documents/gestalt/analysis/qc/test")

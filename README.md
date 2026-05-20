@@ -9,9 +9,8 @@ arrays (EPIC, EPICv2, 450K).
 
 The pipeline outputs **raw (unmasked) matrices** alongside a quality
 mask and detection p-values; nothing is excluded automatically.
-`applymask()` is the single function that turns those matrices into a
+`cleanmat()` is the single function that turns those matrices into a
 filtered analysis matrix, on the user's terms.
-
 
 ## Features
 
@@ -25,12 +24,12 @@ filtered analysis matrix, on the user's terms.
 - **Epigenetic age prediction** via the hardcoded Horvath (2013)
   clock (353 CpGs).
 - **SNP identity verification** via MDS on rs probes.
-- **QC report PDF**: detection rate, probe-failure tail
+- **Nine-page QC report PDF**: detection rate, probe-failure tail
   histogram, MDS, intensity, sample beta density, sex check, age
-  check, and PCA plots.
+  check, scree, and a 2×3 panel of PC-vs-associated-variable plots.
 - **Cell-type deconvolution** (EpiDISH RPC) for blood-derived
   tissues.
-- **`applymask()`** — single filtering primitive with optional
+- **`cleanmat()`** — single primitive for applying QC decisions, with optional
   chunked k-NN imputation.
 
 ## Installation
@@ -73,26 +72,28 @@ mask  <- readRDS("output/mask_all.rds")
 detP  <- readRDS("output/detP_all.rds")
 ss    <- read.csv("output/sample_sheet.csv")
 
-# Standard autosomal-CpG EWAS matrix
-betas_ewas <- applymask(
+# Standard autosomal-CpG EWAS matrix; feed cleanmat the QC CSVs directly
+betas_ewas <- cleanmat(
   betas, mask = mask, detP = detP, pthresh = 0.05,
-  exclude  = ss$sample_id[ss$flagged],
-  probes   = "cg",
-  platform = "EPIC")
+  dropprobes  = "output/failed_probes.csv",
+  dropsamples = "output/flagged_samples.csv",
+  probes      = "cg",
+  platform    = "EPIC")
 ```
 
 If you want an advisory list of samples below a custom call-rate
 threshold:
 
 ```r
-flagged <- flagsamples(detP, callrate = 0.95,
-                       csv = "output/flagged_samples.csv")
-bad_ids <- flagged$sample_id[flagged$flagged]
-betas_clean <- applymask(
+flagsamples(detP, callrate = 0.95,
+            csv = "output/flagged_samples.csv")
+# Then cleanmat() will consume that file directly:
+betas_clean <- cleanmat(
   betas, mask = mask, detP = detP,
-  exclude  = bad_ids,
-  probes   = c("cg", "ch"),
-  platform = "EPIC")
+  dropsamples = "output/flagged_samples.csv",
+  dropprobes  = "output/failed_probes.csv",
+  probes      = c("cg", "ch"),
+  platform    = "EPIC")
 ```
 
 ## Pipeline outputs
@@ -120,28 +121,30 @@ flag list, call `flagsamples()`. Probe-level masking lives in
 See [METHODS.md](METHODS.md) for the full technical reference: exact
 thresholds, the QCDP + B preprocessing order, the `frac_dt`
 vs `colMeans(detP <= 0.05)` distinction, the QC-plot algorithms, the
-`applymask()` order of operations, and design rationale.
+`cleanmat()` order of operations, and design rationale.
 
-## `applymask()` in one screen
+## `cleanmat()` in one screen
 
 ```r
 # Just quality mask
-betas_masked <- applymask(betas, mask = mask, probes = NULL)
+betas_masked <- cleanmat(betas, mask = mask, probes = NULL)
 
-# Strict detection + k-NN imputation
-betas_strict <- applymask(
+# Strict detection + k-NN imputation; consume the QC CSVs directly
+betas_strict <- cleanmat(
   betas, mask = mask, detP = detP, pthresh = 0.01,
-  probes   = "cg", platform = "EPIC",
-  impute   = TRUE, knnk = 10)
+  dropprobes  = "output/failed_probes.csv",
+  dropsamples = "output/flagged_samples.csv",
+  probes      = "cg", platform = "EPIC",
+  impute      = TRUE, knnk = 10)
 
 # Sex chromosome probes only
-betas_sex <- applymask(
+betas_sex <- cleanmat(
   betas, mask = mask, detP = detP,
   probes = "sex", platform = "EPIC")
 
 # SNP probes only
-betas_snp <- applymask(
-  betas, probes = "snp", platform = "EPIC")
+betas_snp <- cleanmat(
+  betas, probes = "snp")
 ```
 
 `probes` accepts any subset of `c("cg", "ch", "sex", "snp", "other")`,
@@ -153,7 +156,7 @@ chromosome cg probes live in `"sex"`.
 - **Raw matrices + masks.** Signal and QC are decoupled. Different
   downstream analyses need different masks.
 - **Flag, don't filter.** The pipeline produces flags and a report.
-  Filtering is the user's responsibility, via `applymask()`.
+  Filtering is the user's responsibility, via `cleanmat()`.
 - **MDS on all probes, PCA on top-variable.** The page-3 MDS uses
   every complete-case cg/ch non-sex probe; the page-9 PCA uses the
   top `ntop` (default 100,000) by variance.

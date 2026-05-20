@@ -43,5 +43,5 @@ Invisibly, the number of samples in the slice.
 Produces QC plots, optional EpiDISH cell-type proportions, and a
 consolidated sample sheet. Performs NO automatic sample or probe
 exclusion: only flag columns are written. The user applies exclusion
-criteria downstream via \code{\link{applymask}}.
+criteria downstream via \code{\link{cleanmat}}.
 }

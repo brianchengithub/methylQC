@@ -1,17 +1,15 @@
 # methylQC: Methods and Technical Documentation
 
-**Version 2.0.0**
+**Version 2.0.1**
 
 ---
 
-## 0. What changed in v2.0.0
-
-Breaking changes from v1.x. There are no deprecation shims.
+## 0. What changed in v2.0.1
 
 - **No automatic exclusion.** v1.x wrote `exclude_samples.csv` and
   `exclude_probes.csv` and built a "filtered" beta matrix internally.
   v2.0.0 produces **flags only**. The user decides what to exclude and
-  applies it via `applymask()`.
+  applies it via `cleanmat()`.
 - **No probe-exclusion table at all.** `exclude_probes.csv`,
   `probe_call_rates.csv`, and the `low_call_rate` flag are gone.
   Probe-level masking is carried entirely by the `mask` and `detP`
@@ -33,7 +31,7 @@ API rename map for the user-facing surface:
 
 | v1.x                              | v2.0.0          |
 |-----------------------------------|-----------------|
-| `apply_mask`                      | `applymask`     |
+| `apply_mask`                      | `cleanmat`      |
 | `build_sample_exclusions`         | (internal `qcflags`) |
 | `build_probe_exclusions`          | (removed)       |
 | `check_sample_metadata`           | `checkmeta`     |
@@ -73,7 +71,7 @@ methylation arrays (EPIC, EPICv2, 450K).
   for blood-derived tissues, and writes a consolidated sample sheet.
 
 **Nothing is removed automatically.** The pipeline flags; the user
-applies exclusions via `applymask()`. The optional `flagsamples()`
+applies exclusions via `cleanmat()`. The optional `flagsamples()`
 utility produces an advisory CSV of samples whose call rate falls
 below a user-chosen threshold.
 
@@ -154,7 +152,7 @@ with `cg`, `ch`, or `rs`. On EPIC this includes `nv` (negative
 verification) probes among others.
 
 **Sex chromosome probes** are a subset of `cg` probes — all sex
-probes have the `cg` prefix. In `applymask()` they are partitioned
+probes have the `cg` prefix. In `cleanmat()` they are partitioned
 out of `"cg"` into their own category `"sex"` so the user can include
 or exclude them independently.
 
@@ -249,7 +247,7 @@ For each sample, computes `colMeans(detP <= pthresh, na.rm = TRUE)`
 (see §2.6) and writes the rows with call rate below `callrate` to
 `csv`. Returns the full table invisibly. **Does not modify any
 matrix and does not accept hand-picked IDs** — those go into
-`applymask(exclude = …)`.
+`cleanmat(dropsamples = …)`.
 
 ### 3.3 QC diagnostic report (PDF)
 
@@ -259,7 +257,7 @@ explicitly; legend visibility follows the same rules.
 | Page | Panel                                | Colour by                                   |
 |------|--------------------------------------|---------------------------------------------|
 | 1    | Detection rate per sample (bar)      | Low-detection flag (`frac_dt < samplemin`)  |
-| 2    | Per-probe sample-failure histogram (tail only) | Single colour; tail-only by design |
+| 2    | Per-probe sample-failure histogram (full range) | Single colour; Y axis capped to expose the tail |
 | 3    | MDS on all non-sex cg/ch probes      | MDS outlier (4 SD from geometric median)    |
 | 4    | Mean intensity per sample (histogram)| MDS outlier (precedence) > low-intensity > OK |
 | 5    | Sample beta-value density            | Low-intensity flag                          |
@@ -272,16 +270,27 @@ explicitly; legend visibility follows the same rules.
 `frac_dt`. Dashed line at `samplemin`. Bars below the threshold are
 red.
 
-**Page 2 — Per-probe sample-failure histogram (tail only).** Replaces
-v1.x's per-probe call-rate distribution. The bulk of probes failing
-in near-0% of samples is intentionally omitted so the tail is
-visible. The plot is built from `detP` by default
+**Page 2 — Per-probe sample-failure histogram (full range, Y capped).**
+Replaces v1.x's per-probe call-rate distribution. The histogram spans
+the full 0–1 X axis in 40 equal-width bins so the shape of the
+distribution — and in particular *where it starts to drop* — is
+visible. The Y axis is capped at 1.5 × the tallest bin centred at
+`fail_rate ≥ 0.05`; this deliberately clips the dominant near-zero
+spike (probes that fail in almost no samples) while leaving every
+other bar at full height. The clipped bin's count is reported in the
+subtitle so the spike's magnitude is still known.
+
+A dashed vertical line at `failmin` (default 0.10, configurable via
+`mqcset(failmin = …)`) marks the CSV cutoff. Probes with
+`fail_rate ≥ failmin` are written to `failed_probes.csv`. The CSV
+behaviour is unchanged from earlier v2 drafts; only the plot is
+broader now.
+
+Failure rate is built from `detP` by default
 (`rowMeans(detP > pthresh)`); if `detP` is unavailable, falls back to
 `mask`, then to `is.na(betas)`. Quality-masked probes are excluded
 from the histogram by default (`inclqual = FALSE`); set
-`inclqual = TRUE` to include them. The configurable threshold is
-`failmin` (default 0.95): probes with failure rate ≥ `failmin` form
-the tail. All tail probes are written to `failed_probes.csv`.
+`inclqual = TRUE` to include them.
 
 **Page 3 — MDS.** Classical multidimensional scaling on **all**
 complete-case cg/ch non-sex probes (v1.x took a top-variable subset
@@ -417,26 +426,49 @@ A single `sample_sheet.csv` per Stage 2 slice (one per cell type if
 
 ---
 
-## 4. Applying masks: `applymask()`
+## 4. Applying QC decisions: `cleanmat()`
 
-`applymask()` is where exclusion actually happens. The function is
-deterministic and never reaches into the sample sheet; the user
-passes IDs explicitly.
+`cleanmat()` is the single primitive for turning the raw Stage 1
+matrices into an analysis-ready matrix. It does five things in a
+fixed order; the user controls each by passing the relevant
+argument, but methylQC never picks IDs on the user's behalf.
+
+The function was named `applymask()` in earlier v2 drafts. It was
+renamed when probe and sample exclusion were folded in, because
+"masking" is no longer the only thing it does.
 
 ### 4.1 Signature
 
 ```r
-applymask(mat,
-          mask     = NULL,          # logical matrix; TRUE = mask out
-          detP     = NULL,          # numeric matrix; mask if detP > pthresh
-          pthresh  = 0.05,
-          exclude  = NULL,          # sample IDs to drop (columns)
-          probes   = c("cg", "ch"), # categories to keep
-          platform = NULL,          # required if "cg" or "sex" in probes
-          impute   = FALSE,
-          knnk     = 10L,
-          chunk    = 50000L)
+cleanmat(mat,
+         mask        = NULL,          # logical matrix; TRUE = mask out
+         detP        = NULL,          # numeric matrix; mask where detP > pthresh
+         pthresh     = NULL,          # default mqcopts()$detp (0.05)
+         dropprobes  = NULL,          # NULL | char vec of probe IDs | CSV path
+         dropsamples = NULL,          # NULL | char vec of sample IDs | CSV path
+         probes      = c("cg", "ch"), # categories to keep
+         platform    = NULL,          # required if "cg" or "sex" in probes
+         impute      = FALSE,
+         knnk        = 10L,
+         chunk       = 50000L)
 ```
+
+`dropprobes` and `dropsamples` each accept:
+
+- **`NULL`** — no exclusion of that kind.
+- **A character vector of IDs** — explicit list. `dropprobes` matches
+  against `rownames(mat)`; `dropsamples` against `colnames(mat)`.
+- **A length-1 string that is a path to a CSV file** — the function
+  reads it and pulls IDs from the `probe_id` (or `sample_id`) column;
+  if no such column is present, it falls back to the first column.
+  This is what consumes methylQC's own `failed_probes.csv` and
+  `flagged_samples.csv` directly.
+
+Disambiguation: if the argument is length 1 AND `file.exists()`
+returns TRUE, it is treated as a path. Otherwise it is treated as
+an ID vector. A length-1 ID like `"cg00000029"` is therefore
+interpreted as an ID, not a path, as long as no file by that name
+exists in the working directory.
 
 `probes` is a character vector of probe categories to **keep**:
 
@@ -450,7 +482,8 @@ applymask(mat,
 
 Pass `NULL` to keep every probe (no category filter). The five
 categories form a strict partition — `"cg"` always excludes
-sex-chromosome cg probes, and `"sex"` always excludes from the others.
+sex-chromosome cg probes, and `"sex"` always excludes from the
+others.
 
 `platform` is required iff `"cg"` or `"sex"` is in `probes`, because
 the sex-vs-autosomal split is read from the SeSAMe manifest.
@@ -459,11 +492,18 @@ the sex-vs-autosomal split is read from the SeSAMe manifest.
 
 1. **Quality mask** → set positions where `mask == TRUE` to `NA`.
 2. **Detection** → set positions where `detP > pthresh` to `NA`.
-3. **Exclude samples** → drop columns whose name is in `exclude`.
-4. **Probe category filter** → keep only probes in any of the
+3. **Drop samples** → resolve `dropsamples` (vector or CSV) and drop
+   matching columns.
+4. **Drop probes** → resolve `dropprobes` (vector or CSV) and drop
+   matching rows.
+5. **Probe category filter** → keep only probes in any of the
    `probes` categories.
-5. **k-NN imputation** (optional) → chunked `impute::impute.knn`
+6. **k-NN imputation** (optional) → chunked `impute::impute.knn`
    with `k = knnk`, chunk size `chunk`.
+
+Probe and sample exclusions happen **before** the category filter so
+the user's explicit drops take precedence and the category filter
+operates on the post-exclusion matrix.
 
 ### 4.3 Common workflows
 
@@ -471,51 +511,65 @@ the sex-vs-autosomal split is read from the SeSAMe manifest.
 betas <- readRDS("results/betas_all.rds")
 mask  <- readRDS("results/mask_all.rds")
 detP  <- readRDS("results/detP_all.rds")
-ss    <- read.csv("results/sample_sheet.csv")
 
-# Standard EWAS: autosomal CpG, mask + detP, drop flagged samples
-betas_ewas <- applymask(
-  betas, mask = mask, detP = detP, pthresh = 0.05,
-  exclude  = ss$sample_id[ss$flagged],
-  probes   = "cg",
-  platform = "EPIC")
+# The "feed cleanmat the QC artifacts directly" workflow. This is the
+# happy path: cleanmat reads probe IDs from failed_probes.csv and
+# sample IDs from flagged_samples.csv on disk, applies masks, drops
+# them, keeps autosomal CpG, and imputes.
+betas_ewas <- cleanmat(
+  betas, mask = mask, detP = detP,
+  dropprobes  = "results/failed_probes.csv",
+  dropsamples = "results/flagged_samples.csv",
+  probes      = "cg",
+  platform    = "EPIC",
+  impute      = TRUE)
+
+# Mix forms: probe IDs from a CSV, sample IDs from an in-memory vector
+ss <- read.csv("results/sample_sheet.csv")
+betas_clean <- cleanmat(
+  betas, mask = mask, detP = detP,
+  dropprobes  = "results/failed_probes.csv",
+  dropsamples = ss$sample_id[ss$flagged],
+  probes      = "cg", platform = "EPIC")
 
 # CpG + non-CpG methylation, autosomal
-betas_all_meth <- applymask(
+betas_all_meth <- cleanmat(
   betas, mask = mask, detP = detP,
   probes = c("cg", "ch"), platform = "EPIC")
 
 # Keep sex chromosome probes alongside autosomes
-betas_with_sex <- applymask(
+betas_with_sex <- cleanmat(
   betas, mask = mask, detP = detP,
   probes = c("cg", "sex"), platform = "EPIC")
 
 # Sex chromosome probes only
-betas_sex_only <- applymask(
+betas_sex_only <- cleanmat(
   betas, mask = mask, detP = detP,
   probes = "sex", platform = "EPIC")
 
-# SNP probes only (for identity work)
-betas_snp <- applymask(
-  betas, probes = "snp", platform = "EPIC")
+# SNP probes only (for identity work) — no platform needed
+betas_snp <- cleanmat(
+  betas, probes = "snp")
 
-# Minimal: just quality mask, no category filter
-betas_masked <- applymask(
+# Minimal: just the quality mask, no category filter, no exclusions
+betas_masked <- cleanmat(
   betas, mask = mask, probes = NULL)
 
-# Strict detection + k-NN imputation
-betas_strict <- applymask(
+# Stricter detection threshold + imputation
+betas_strict <- cleanmat(
   betas, mask = mask, detP = detP, pthresh = 0.01,
-  exclude  = ss$sample_id[ss$flagged],
-  probes   = "cg", platform = "EPIC",
-  impute   = TRUE, knnk = 10, chunk = 50000)
+  dropprobes  = "results/failed_probes.csv",
+  dropsamples = "results/flagged_samples.csv",
+  probes      = "cg", platform = "EPIC",
+  impute      = TRUE, knnk = 10, chunk = 50000)
 
-# Same filter applied to M-values
+# Same filter chain on M-values
 mvals <- readRDS("results/mvals_all.rds")
-mvals_clean <- applymask(
+mvals_clean <- cleanmat(
   mvals, mask = mask, detP = detP,
-  exclude  = ss$sample_id[ss$flagged],
-  probes   = "cg", platform = "EPIC")
+  dropprobes  = "results/failed_probes.csv",
+  dropsamples = "results/flagged_samples.csv",
+  probes      = "cg", platform = "EPIC")
 ```
 
 ---
@@ -551,7 +605,7 @@ the primary name is absent (e.g. `donoraliases`, `sexaliases`).
 | `intmin`     | 1300    | Sample is flagged low-intensity if `mean_intensity < intmin` (strict).                        |
 | `detp`       | 0.05    | A probe passes detection at `detP <= detp`; fails at `detP > detp`.                           |
 | `ntop`       | 100000  | Number of top-variance probes used by PCA (page 9). MDS (page 3) uses **all** cg/ch non-sex.  |
-| `failmin`    | 0.95    | Page-2 tail cutoff: probes with sample-failure rate `>= failmin` enter the histogram / CSV.   |
+| `failmin`    | 0.10    | Page-2 CSV cutoff: probes with `fail_rate >= failmin` written to `failed_probes.csv`; dashed vertical line on the plot. Matches meffil's `detectionp.cpgs.threshold`. |
 | `inclqual`   | `FALSE` | Page-2 setting: include quality-masked probes in the failure histogram if `TRUE`.             |
 | `cores`      | 1       | Cores for SeSAMe (kept low because streaming is per-sample).                                  |
 | `savesdf`    | `FALSE` | Persist the full SigDF list to disk (memory-expensive).                                       |
@@ -576,7 +630,7 @@ mqcset(samplemin = 0.85)
 prep(dir = "results")
 
 # Per-call detection threshold
-betas_strict <- applymask(betas, mask = mask, detP = detP, pthresh = 0.01)
+betas_strict <- cleanmat(betas, mask = mask, detP = detP, pthresh = 0.01)
 
 # Inspect / reset
 str(mqcopts())
@@ -684,8 +738,8 @@ mask_lifted <- methylQC:::apply_epicv2_map(mask, lifted$kept_ids,
 detP_lifted <- methylQC:::apply_epicv2_map(detP, lifted$kept_ids,
                                            lifted$id_map, fill = NA_real_)
 
-# Now hand to applymask() exactly like any non-v2 cohort
-betas_clean <- applymask(
+# Now hand to cleanmat() exactly like any non-v2 cohort
+betas_clean <- cleanmat(
   lifted$mat, mask = mask_lifted, detP = detP_lifted,
   probes = "cg", platform = "EPIC")
 ```
@@ -748,7 +802,7 @@ authoritative but were advisory; users either ignored them or treated
 them as gospel. v2.0.0 produces no exclusion lists by default. The
 only sample-level exclusion utility (`flagsamples()`) is opt-in and
 explicit in what it does. The only place exclusion actually happens
-is `applymask()`, which takes IDs the user provides.
+is `cleanmat()`, which takes IDs the user provides.
 
 **MDS on all probes (change from v1.x top-N).** Top-variable selection
 before MDS biases the embedding toward whatever drove that variance
@@ -765,11 +819,34 @@ scatter plots tell you the shape of variation. PC-vs-variable plots
 tell you what each axis means. Six panels on one page also fit a
 single sheet (2×3 via `gridExtra::grid.arrange`).
 
-**Tail-only probe-failure histogram (new in v2.0.0).** Plotting the
-full per-probe failure distribution is dominated by the spike near
-0% and tells you nothing. The tail is the diagnostic part. The total
-omitted at ~0% is reported in the subtitle and the tail probes are
-exported as CSV.
+**Full-range probe-failure histogram with a capped Y axis.** Plotting
+the per-probe failure distribution at its natural scale is dominated
+by the spike near 0% and tells you nothing. Plotting *only* the tail
+(an earlier v2 draft) tells you what's already exported to CSV but
+hides the shape of the rest of the distribution — specifically,
+where the distribution starts to drop. v2.0.0 plots the full 0-1 range
+in 40 bins and caps the Y axis at 1.5 × the tallest bin centred at
+`fail_rate ≥ 0.05`, deliberately clipping the near-zero spike. The
+clipped spike's count is reported in the subtitle. A dashed line at
+`failmin` marks the CSV cutoff; the tail probes themselves continue
+to be exported to `failed_probes.csv` unchanged.
+
+**`failmin = 0.10` default.** The defensible range across mainstream
+EWAS packages is 0% (ChAMP, minfi traditional) through 10% (meffil's
+`detectionp.cpgs.threshold = 0.1`), with intermediate choices at 5%
+(DNAmArray workflow). 10% is the liberal end of that range and is
+appropriate when k-NN imputation is available downstream: at typical
+EWAS cohort sizes (n ≳ 100), `cleanmat(..., impute = TRUE)` recovers
+the per-probe NAs from the `mask` / `detP` matrices reliably, so the
+cost of keeping a probe that fails in 5–9% of samples is modest. The
+0% / "drop if any sample fails" rule used historically by ChAMP and
+minfi is increasingly seen as too aggressive at EPIC scale (10–20%
+of cg probes typically discarded). The Lehne 2015 and Heiss & Just
+2019 recommendations are framed in terms of the *per-sample* detection
+p-value rather than the cohort fraction; methylQC's per-sample default
+remains pOOBAH `p < 0.05` (SeSAMe default), so the cohort fraction is
+the only knob protecting against systematically noisy probes — picking
+it deliberately matters.
 
 **Intensity plot precedence (MDS > low-intensity > OK).** MDS
 outliers warrant the strongest signal regardless of intensity.
@@ -789,13 +866,13 @@ batch-to-batch shifts in absolute intensity because the bands adapt
 to the data; transparently visualised.
 
 **Optional imputation.** Chunked k-NN via
-`applymask(..., impute = TRUE)`. Chunking is essential at EPIC scale.
+`cleanmat(..., impute = TRUE)`. Chunking is essential at EPIC scale.
 
 **No batch correction.** Analysis-specific. PCA panel (page 9) helps
 identify whether batch variables associate with the leading PCs.
 
 **Short user-facing names; internals keep underscores.** A user typing
-`applymask` repeatedly benefits from one token. Internal helpers
+`cleanmat` repeatedly benefits from one token. Internal helpers
 (`resolve_column`, `normalize_sex`, `predict_horvath_age`,
 `parse_age_robust`, `geometric_median`, …) keep underscores because
 they are referenced by other internals and clarity inside the codebase

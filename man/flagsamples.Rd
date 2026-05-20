@@ -39,7 +39,7 @@ and writes a CSV of every sample whose call rate falls below
 \details{
 This function performs NO automatic exclusion. It only produces a list.
 To act on it, the user passes the IDs themselves to
-\code{\link{applymask}(exclude = ...)} — either the returned vector or a
+\code{\link{cleanmat}(dropsamples = ...)} — either the returned vector or a
 CSV they assemble. \code{flagsamples()} does not accept hand-picked IDs;
 it flags purely on the call-rate threshold.
 }
@@ -52,7 +52,7 @@ bad_ids <- flagged$sample_id[flagged$flagged]
 
 betas <- readRDS("results/betas_all.rds")
 mask  <- readRDS("results/mask_all.rds")
-betas_clean <- applymask(betas, mask = mask, detP = detP,
-                         exclude = bad_ids, platform = "EPIC")
+betas_clean <- cleanmat(betas, mask = mask, detP = detP,
+                         dropsamples = bad_ids, platform = "EPIC")
 }
 }
