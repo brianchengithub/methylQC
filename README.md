@@ -12,8 +12,6 @@ mask and detection p-values; nothing is excluded automatically.
 `applymask()` is the single function that turns those matrices into a
 filtered analysis matrix, on the user's terms.
 
-![methylQC Overview](https://github.com/brianchengithub/methylQC/blob/main/overview.svg)
-
 
 ## Features
 
