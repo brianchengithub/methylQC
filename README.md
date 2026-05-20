@@ -1,6 +1,5 @@
 #methylQC
 
-<img width="300" height="138" alt="overview" src="https://github.com/user-attachments/assets/56899910-3dc3-45fb-8c83-872d31097632" /># 
 
 **QC and preprocessing pipeline for Illumina DNA methylation arrays.**
 
