@@ -56,16 +56,21 @@ mqcdefaults <- function() {
     # intmin    : minimum per-sample mean intensity before low-intensity flag.
     # probemin  : per-probe pass-rate used ONLY for the console "Probe breakdown"
     #             summary. It is informational and drives no file or exclusion.
-    # failmin   : per-probe sample-FAILURE fraction at/above which a probe enters
-    #             the QC-report probe-failure tail plot and the exported CSV.
+    # failmin   : per-probe sample-FAILURE fraction at/above which a probe is
+    #             written to failed_probes.csv. The Page-2 plot draws a dashed
+    #             vertical line at this value. Default 0.05 sits at the
+    #             conservative end of the EWAS-package range (ChAMP 0%, minfi
+    #             traditional 0%, DNAmArray 5%, meffil 10%). Conservative
+    #             choice with pOOBAH p < 0.05 since the cohort fraction is the
+    #             only knob protecting against systematically noisy probes.
     detp      = 0.05,
     samplemin = 0.95,
     intmin    = 1300,
     probemin  = 0.95,
-    failmin   = 0.95,
+    failmin   = 0.10,
 
     # inclqual : if TRUE, quality-masked probes are kept in the probe-failure
-    #            tail plot/CSV. Default FALSE excludes them (they fail by design).
+    #            plot/CSV. Default FALSE excludes them (they fail by design).
     inclqual  = FALSE,
 
     # ---- QC plots ----

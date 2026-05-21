@@ -6,7 +6,7 @@
 #
 # Page order (REORDERED in v2.0.0):
 #   1. Detection rate per sample           (col by low-detection flag)
-#   2. Per-probe failure histogram (tail)  (NEW; tail-only; exports CSV)
+#   2. Per-probe failure histogram          (full 0-1 range; Y axis capped)
 #   3. MDS on ALL non-sex cg/ch probes     (col by MDS outlier)
 #   4. Mean intensity per sample           (MDS outlier > low-intensity > OK)
 #   5. Beta density per sample             (NEW; col by low-intensity flag)
@@ -17,8 +17,8 @@
 #
 # Colour-coding rules (per design v2.0.0):
 #   detection rate  - low-detection flag only
-#   probe failure   - colour-coded by sample, not probe (only count of probes
-#                     failing the threshold defined by callrate)
+#   probe failure   - single colour; Y axis capped so the tail is visible.
+#                     Dashed vertical line at failmin marks the CSV cutoff
 #   MDS             - sample outside geometric-median 4-SD ring
 #   intensity       - MDS outlier wins; else low-intensity flag; else OK
 #   beta density    - low-intensity flag only
@@ -105,9 +105,9 @@ qcreport <- function(ss, betas, betasok, flagged,
         nrow(ss), cfg$samplemin),
       x = NULL, y = "Fraction detected"))
 
-  # ---- Page 2: Per-probe failure histogram (tail) ----
+  # ---- Page 2: Per-probe failure histogram (full range, Y capped) ----
   mds_outlier_ids <- character(0)  # filled in by plot_mds()
-  plot_probe_failure_tail(betas, mask, detP, cfg, theme_qc, tailcsv, logger)
+  plot_probe_failure(betas, mask, detP, cfg, theme_qc, tailcsv, logger)
 
   # ---- Page 3: MDS on ALL non-sex cg/ch probes ----
   mds_outlier_ids <- plot_mds(betas, ss, donor_col, sex_probes, theme_qc, logger)
@@ -160,15 +160,15 @@ qcreport <- function(ss, betas, betasok, flagged,
 }
 
 ###############################################################################
-# Probe-failure tail (Page 2)
+# Per-probe sample-failure histogram (Page 2)
 ###############################################################################
-#' Per-probe sample-failure histogram (tail-only, NEW in v2.0.0)
+#' Per-probe sample-failure histogram (full range, Y axis capped)
 #'
-#' Plots a histogram of per-probe sample-failure rate for probes whose
-#' failure rate is at least \code{failmin} (the "tail" of the distribution).
-#' The bulk of probes (near 0%) is intentionally omitted from the plot
-#' so the tail is visible. The number of omitted probes is reported in
-#' the title.
+#' Plots a histogram of per-probe sample-failure rate across the full
+#' 0-1 range. The Y axis is capped so the long tail is visible, at the
+#' cost of clipping the leftmost spike (probes that fail in near-0% of
+#' samples). A dashed vertical line marks \code{failmin}, the threshold
+#' above which probes are written to \code{tailcsv}.
 #'
 #' Failure rate is derived from detP by default
 #' (\code{rowMeans(detP > pthresh)}), then mask, then \code{is.na(betas)}.
@@ -177,8 +177,8 @@ qcreport <- function(ss, betas, betasok, flagged,
 #' via \code{mqcopts()} to keep them.
 #' @keywords internal
 #' @noRd
-plot_probe_failure_tail <- function(betas, mask, detP, cfg, theme_qc,
-                                    tailcsv, logger = NULL) {
+plot_probe_failure <- function(betas, mask, detP, cfg, theme_qc,
+                               tailcsv, logger = NULL) {
   pthresh  <- cfg$detp
   failmin  <- cfg$failmin
   inclqual <- isTRUE(cfg$inclqual)
@@ -216,60 +216,73 @@ plot_probe_failure_tail <- function(betas, mask, detP, cfg, theme_qc,
   fail_rate <- fail_rate[keep]
   probe_ids <- probe_ids[keep]
 
-  n_total <- length(fail_rate)
-  # "Approximately 0%" group: probes failing in fewer than 5% of samples
-  low_cutoff <- 0.05
-  n_low <- sum(fail_rate < low_cutoff)
-
+  n_total  <- length(fail_rate)
   tail_idx <- which(fail_rate >= failmin)
   n_tail   <- length(tail_idx)
 
-  # Export the tail probes -------------------------------------------------
+  # Write the tail probes to CSV (probes with fail_rate >= failmin) -------
   tail_df <- data.frame(
-    probe_id = probe_ids[tail_idx],
+    probe_id  = probe_ids[tail_idx],
     fail_rate = fail_rate[tail_idx],
     stringsAsFactors = FALSE)
   tail_df <- tail_df[order(-tail_df$fail_rate), ]
   utils::write.csv(tail_df, tailcsv, row.names = FALSE)
   if (!is.null(logger))
     logger$log("qc_plots",
-               sprintf("probe-failure tail: %d probes >= %.2f written to %s (source=%s)",
+               sprintf("probe-failure: %d probes with fail_rate >= %.2f written to %s (source=%s)",
                        n_tail, failmin, tailcsv, source))
 
-  # Plot --------------------------------------------------------------------
-  if (n_tail == 0) {
-    print(ggplot2::ggplot() +
-      ggplot2::annotate("text", x = 0.5, y = 0.5,
-        label = sprintf(
-          "No probes with failure rate >= %.2f (of %d probes considered)",
-          failmin, n_total), size = 5) +
-      theme_qc + ggplot2::xlim(0, 1) + ggplot2::ylim(0, 1) +
-      ggplot2::labs(title = "Per-probe sample-failure rate (tail only)",
-                    x = NULL, y = NULL))
-    return(invisible(NULL))
-  }
+  # Bin counts manually so the Y cap can be derived from the data ---------
+  nbins  <- 40L
+  breaks <- seq(0, 1, length.out = nbins + 1L)
+  hh     <- graphics::hist(fail_rate, breaks = breaks, plot = FALSE)
+  counts <- hh$counts
+  mids   <- hh$mids
 
-  qmask_note <- if (inclqual) "quality-masked probes INCLUDED" else
-                              "quality-masked probes excluded"
+  # Y cap: 1.5x the tallest bin centred at fail_rate >= 0.05. The leftmost
+  # spike of probes passing in ~all samples is deliberately ignored from
+  # the cap; that bar still extends above the visible area. The 0.05
+  # cap-exclusion cutoff is independent of failmin: it's about clipping
+  # the leftmost spike, not the CSV threshold.
+  rest   <- counts[mids >= 0.05]
+  y_cap  <- if (length(rest) > 0 && max(rest) > 0) 1.5 * max(rest)
+            else                                    max(counts)
+  if (!is.finite(y_cap) || y_cap <= 0) y_cap <- max(counts, 1)
+
+  spike_bin <- counts[1]
+  spike_clipped <- spike_bin > y_cap
+
+  qmask_note <- if (inclqual) " (incl. quality-masked)" else ""
   subtitle_txt <- sprintf(
-    paste0("Source: %s. %s probes considered; %s with failure < %.0f%%; ",
-           "tail (>= %.2f) = %s probe(s). %s. Tail probes written to %s."),
-    source,
+    "%s probes from %s%s. %s with fail >= %.2f written to %s.%s",
     format(n_total, big.mark = ","),
-    format(n_low,   big.mark = ","),
-    100 * low_cutoff,
-    failmin,
-    format(n_tail,  big.mark = ","),
+    source,
     qmask_note,
-    basename(tailcsv))
+    format(n_tail,  big.mark = ","),
+    failmin,
+    basename(tailcsv),
+    if (spike_clipped)
+      sprintf("\nLeftmost bar clipped: %s probes at fail_rate ~ 0 (y capped at %s).",
+              format(spike_bin, big.mark = ","),
+              format(round(y_cap), big.mark = ","))
+    else "")
 
   print(ggplot2::ggplot(
-        data.frame(fr = fail_rate[tail_idx]),
+        data.frame(fr = fail_rate),
         ggplot2::aes(x = fr)) +
-    ggplot2::geom_histogram(bins = 40, fill = "steelblue", color = "white") +
-    ggplot2::scale_x_continuous(limits = c(failmin, 1.0)) +
+    ggplot2::geom_histogram(breaks = breaks,
+                            fill = "steelblue", color = "white") +
+    ggplot2::geom_vline(xintercept = failmin, linetype = "dashed",
+                        color = "red3", linewidth = 0.7) +
+    ggplot2::annotate("text", x = failmin, y = y_cap,
+                      label = sprintf(" failmin = %.2f", failmin),
+                      hjust = 0, vjust = 1.1,
+                      color = "red3", size = 4) +
+    ggplot2::scale_x_continuous(limits = c(0, 1),
+                                breaks = seq(0, 1, by = 0.1)) +
+    ggplot2::coord_cartesian(ylim = c(0, y_cap)) +
     theme_qc + ggplot2::labs(
-      title = "Per-probe sample-failure rate (tail only)",
+      title = "Per-probe sample-failure rate",
       subtitle = subtitle_txt,
       x = sprintf("Fraction of samples where probe failed (detP > %.2f)",
                   pthresh),
@@ -710,6 +723,9 @@ plot_pca_retained <- function(betasok, ss, sex_probes,
                    vp = ve[seq_len(nsc)]),
         ggplot2::aes(PC, vp)) +
     ggplot2::geom_col(fill = "steelblue") + theme_qc +
+    ggplot2::theme(
+      axis.line  = ggplot2::element_line(color = "black", linewidth = 0.4),
+      axis.ticks = ggplot2::element_line(color = "black", linewidth = 0.4)) +
     ggplot2::labs(
       title = "Scree plot (cg/ch probes, sex excluded)",
       subtitle = sprintf("Top %d of %d PCs (%d samples); ntop = %s probes",
@@ -734,6 +750,8 @@ plot_pca_retained <- function(betasok, ss, sex_probes,
   panel_theme <- ggplot2::theme_minimal() + ggplot2::theme(
     axis.title    = ggplot2::element_text(size = 10),
     axis.text     = ggplot2::element_text(size = 8),
+    axis.line     = ggplot2::element_line(color = "black", linewidth = 0.4),
+    axis.ticks    = ggplot2::element_line(color = "black", linewidth = 0.4),
     plot.title    = ggplot2::element_text(size = 11, face = "bold"),
     plot.subtitle = ggplot2::element_text(size = 9),
     legend.text   = ggplot2::element_text(size = 8),
