@@ -58,11 +58,12 @@ mqcdefaults <- function() {
     #             summary. It is informational and drives no file or exclusion.
     # failmin   : per-probe sample-FAILURE fraction at/above which a probe is
     #             written to failed_probes.csv. The Page-2 plot draws a dashed
-    #             vertical line at this value. Default 0.05 sits at the
-    #             conservative end of the EWAS-package range (ChAMP 0%, minfi
-    #             traditional 0%, DNAmArray 5%, meffil 10%). Conservative
-    #             choice with pOOBAH p < 0.05 since the cohort fraction is the
-    #             only knob protecting against systematically noisy probes.
+    #             vertical line at this value. Default 0.10 matches meffil's
+    #             detectionp.cpgs.threshold; liberal end of the defensible
+    #             EWAS-package range (ChAMP 0%, minfi 0%, DNAmArray 5%,
+    #             meffil 10%). Appropriate when k-NN imputation is in the
+    #             downstream workflow and cohort size is large enough that
+    #             10% of samples still provides robust neighbours.
     detp      = 0.05,
     samplemin = 0.95,
     intmin    = 1300,
@@ -170,12 +171,16 @@ normalize_sex <- function(x, col_name = "") {
   result
 }
 
-.onLoad <- function(libname, pkgname) {
-  defaults <- mqcdefaults()
-  for (k in names(defaults)) {
-    opt_name <- paste0("methylQC.", k)
-    if (is.null(getOption(opt_name))) {
-      do.call(options, stats::setNames(list(defaults[[k]]), opt_name))
-    }
-  }
-}
+# NOTE: there is intentionally NO .onLoad() block.
+#
+# An earlier version of this file pre-populated every option via
+# options(methylQC.* = ...) on package load. That meant any subsequent
+# change to mqcdefaults() (e.g. tightening a threshold for a new
+# methylQC release) was IGNORED for the rest of the R session, because
+# the option was already non-NULL. mqcopts() returned the stale value,
+# and the change went silently into the void.
+#
+# Without .onLoad(), session options stay NULL until the user explicitly
+# calls mqcset(). mqcopts() always reads
+#   getOption("methylQC.<key>", mqcdefaults()$<key>)
+# so unset keys cleanly fall through to the current default each call.

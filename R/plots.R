@@ -229,8 +229,8 @@ plot_probe_failure <- function(betas, mask, detP, cfg, theme_qc,
   utils::write.csv(tail_df, tailcsv, row.names = FALSE)
   if (!is.null(logger))
     logger$log("qc_plots",
-               sprintf("probe-failure: %d probes with fail_rate >= %.2f written to %s (source=%s)",
-                       n_tail, failmin, tailcsv, source))
+               sprintf("probe-failure: failmin=%.3f, pthresh=%.3f, %d probes with fail_rate >= failmin written to %s (source=%s)",
+                       failmin, pthresh, n_tail, tailcsv, source))
 
   # Bin counts manually so the Y cap can be derived from the data ---------
   nbins  <- 40L
