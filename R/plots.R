@@ -82,7 +82,6 @@ qcreport <- function(ss, betas, betasok, flagged,
   ss$low_int <- ss$sample_id %in% low_int_ids
 
   sex_probes <- sexprobes(platform)
-  donor_col  <- resolve_column(colnames(ss), cfg$donorcol, cfg$donoraliases)
 
   # ---- Page 1: Detection rate per sample (col by low-detection flag) ----
   ss$status_det <- ifelse(ss$low_det, "Low detection", "OK")
@@ -110,7 +109,7 @@ qcreport <- function(ss, betas, betasok, flagged,
   plot_probe_failure(betas, mask, detP, cfg, theme_qc, tailcsv, logger)
 
   # ---- Page 3: MDS on ALL non-sex cg/ch probes ----
-  mds_outlier_ids <- plot_mds(betas, ss, donor_col, sex_probes, theme_qc, logger)
+  mds_outlier_ids <- plot_mds(betas, ss, sex_probes, theme_qc, logger)
 
   # ---- Page 4: Mean intensity (MDS outlier > low-intensity > OK) ----
   if ("mean_intensity" %in% colnames(ss)) {
@@ -296,7 +295,7 @@ plot_probe_failure <- function(betas, mask, detP, cfg, theme_qc,
 #' MDS panel, using all complete-case non-sex cg/ch probes
 #' @keywords internal
 #' @noRd
-plot_mds <- function(betas, ss, donor_col, sex_probes, theme_qc, logger) {
+plot_mds <- function(betas, ss, sex_probes, theme_qc, logger) {
   keep <- grepl("^(cg|ch)", rownames(betas))
   if (length(sex_probes) > 0)
     keep <- keep & !(rownames(betas) %in% sex_probes)
@@ -323,14 +322,7 @@ plot_mds <- function(betas, ss, donor_col, sex_probes, theme_qc, logger) {
   mds_df <- data.frame(MDS1 = mds[, 1], MDS2 = mds[, 2],
                        sample_id = rownames(mds),
                        stringsAsFactors = FALSE)
-
-  if (!is.na(donor_col)) {
-    m <- match(mds_df$sample_id, ss$sample_id)
-    mds_df$label <- ss[[donor_col]][m]
-    mds_df$label[is.na(mds_df$label)] <- mds_df$sample_id[is.na(mds_df$label)]
-  } else {
-    mds_df$label <- mds_df$sample_id
-  }
+  mds_df$label <- mds_df$sample_id
 
   medoid <- geometric_median(as.matrix(mds_df[, c("MDS1", "MDS2")]))
   all_dists <- sqrt((mds_df$MDS1 - medoid[1])^2 +
