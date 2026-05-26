@@ -6,8 +6,6 @@
 
 ## 0. What changed in v2.0.0
 
-Breaking changes from v1.x. There are no deprecation shims.
-
 - **No automatic exclusion.** v1.x wrote `exclude_samples.csv` and
   `exclude_probes.csv` and built a "filtered" beta matrix internally.
   v2.0.0 produces **flags only**. The user decides what to exclude and
