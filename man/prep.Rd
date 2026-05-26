@@ -4,7 +4,7 @@
 \alias{prep}
 \title{Stage 2 wrapper: optionally split by cell type}
 \usage{
-prep(dir, platform = NULL, bycell = TRUE, ...)
+prep(dir, platform = NULL, bycell = TRUE, dish = TRUE, ...)
 }
 \arguments{
 \item{dir}{Stage 1 output directory.}
@@ -12,6 +12,13 @@ prep(dir, platform = NULL, bycell = TRUE, ...)
 \item{platform}{Optional platform; defaults to value in metadata.rds.}
 
 \item{bycell}{If TRUE, split processing by detected cell type.}
+
+\item{dish}{If TRUE (default), run EpiDISH deconvolution within each
+prepcell() call. There is no built-in tissue allowlist; rundish()
+errors gracefully (and is caught) if the configured reference's
+CpGs don't sufficiently overlap the matrix. Set FALSE to skip
+entirely and call \code{\link{rundish}} on the output directory
+afterwards.}
 
 \item{...}{Option overrides forwarded to \code{\link{mqcset}}.}
 }

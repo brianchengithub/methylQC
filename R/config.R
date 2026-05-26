@@ -79,10 +79,24 @@ mqcdefaults <- function() {
     ntop = 100000L,
 
     # ---- EpiDISH ----
-    dishref    = "centDHSbloodDMC.m",
+    # dishref:
+    #   Either a single reference name (string) or a named list keyed by
+    #   platform string. The default uses the Salas et al. 2022 12-cell
+    #   immune reference, which is split into platform-specific matrices:
+    #     EPIC -> cent12CT.m       (600 CpGs, 12 cell types)
+    #     450k -> cent12CT450k.m   (12-cell reference for 450k arrays)
+    #   The 12 cells are: CD4Tnv, CD4Tmem, CD8Tnv, CD8Tmem, Treg, Bnv, Bmem,
+    #   NK, Mono, Neu, Eos, Bas (Salas et al. 2022, Nat Commun).
+    #   To revert to the original 7-cell Houseman/DHS reference, set
+    #     mqcset(dishref = "centDHSbloodDMC.m")
+    #   (centDHSbloodDMC.m works for both EPIC and 450k.)
+    #
+    # There is no built-in tissue allowlist. rundish() runs whenever the
+    # caller invokes it. The probe-overlap check inside rundish() errors
+    # if the reference cannot be applied to the input matrix; this is
+    # the right gate because it's based on the data, not on a label.
+    dishref    = list(EPIC = "cent12CT.m", "450k" = "cent12CT450k.m"),
     dishmethod = "RPC",
-    bloodtypes = c("PBMC", "WB", "WBC", "buffy", "buffy coat",
-                   "whole blood", "blood"),
 
     # ---- SeSAMe ----
     collapse       = FALSE,

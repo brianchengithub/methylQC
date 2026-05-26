@@ -1,10 +1,12 @@
 # methylQC: Methods and Technical Documentation
 
-**Version 2.0.1**
+**Version 2.0.0**
 
 ---
 
-## 0. What changed in v2.0.1
+## 0. What changed in v2.0.0
+
+Breaking changes from v1.x. There are no deprecation shims.
 
 - **No automatic exclusion.** v1.x wrote `exclude_samples.csv` and
   `exclude_probes.csv` and built a "filtered" beta matrix internally.
@@ -379,33 +381,78 @@ probes, complete cases only. PC scores for all PCs are written to
 
 ### 3.4 EpiDISH cell-type deconvolution
 
-For blood-derived tissues (cell-type label matches
-`mqcopts()$bloodtypes`; default `c("PBMC", "WB", "WBC", "buffy coat",
-"whole blood", "peripheral blood", "leukocyte", "leucocyte")` with
-case-insensitive normalisation), `rundish()` runs EpiDISH with the
-RPC method and the `centDHSbloodDMC.m` reference (7 cell types: B,
-NK, CD4T, CD8T, Monocytes, Neutrophils, Eosinophils) on the raw
-unmasked beta matrix. Proportions are written to
-`cell_proportions.csv` and merged into `sample_sheet.csv`.
+`rundish()` runs EpiDISH (`method = "RPC"` by default) using the
+reference resolved from `mqcopts()$dishref`. Default reference is the
+Salas et al. 2022 12-cell immune panel
+([Nat Commun 13:761, 2022](https://doi.org/10.1038/s41467-021-27864-7)),
+split by platform:
 
-For non-blood tissues, run deconvolution manually with an appropriate
-reference:
+| Platform | Reference | Cells | Cell-type labels |
+|----------|-----------|-------|------------------|
+| EPIC     | `cent12CT.m`    | 12 | CD4Tnv, CD4Tmem, CD8Tnv, CD8Tmem, Treg, Bnv, Bmem, NK, Mono, Neu, Eos, Bas |
+| 450k     | `cent12CT450k.m`| 12 | same 12 cell types |
+
+To revert to the original 7-cell Houseman/DHS reference, set
+`mqcset(dishref = "centDHSbloodDMC.m")` — that matrix is dual-platform
+and produces columns `B, NK, CD4T, CD8T, Mono, Neutro, Eosino`.
+
+**No built-in tissue allowlist.** Earlier methylQC drafts hard-coded
+a list of blood-tissue tokens (`PBMC, WB, WBC, …`) and silently
+skipped EpiDISH for anything else. v2.0.0 dropped that: cell-type
+labels are user-defined and not reliable ("BM" can mean bone marrow
+or B-memory; "Mono" can mean monocyte or whatever the lab called it).
+The only gate is data-level: `rundish()` errors if the reference's
+CpGs don't sufficiently overlap (< 50) the input matrix.
+
+**Two calling forms** of the same function:
 
 ```r
+# Form A (in-memory): returns the proportion matrix, no I/O
+props <- rundish(betas, platform = "EPIC")
+
+# Form B (on-disk): writes cell_proportions.csv AND merges columns
+# into sample_sheet.csv on disk; returns proportions invisibly
+rundish("results/PBMC")
+rundish("results", celltype = "BM")          # filter by sample-sheet label
+rundish("results", samples  = c("S1","S2"))  # filter by ID
+rundish("results/PBMC", ref = "centDHSbloodDMC.m")   # override ref
+rundish("results/PBMC", method = "CBS")              # override method
+```
+
+The on-disk form is dispatched when the first argument is a length-1
+string that points to an existing directory. It loads
+`betas_all.rds`, optionally subsets, runs the in-memory primitive,
+writes `cell_proportions.csv`, and left-joins the proportion columns
+into `sample_sheet.csv` (removing any stale prop columns from a prior
+run before merging).
+
+**In-pipeline vs standalone — same end state.** When EpiDISH runs as
+part of Stage 2 (`prep(..., dish = TRUE)`, the default), the
+proportions get merged into the per-cell-type `sample_sheet.csv` via
+`build_consolidated_sample_sheet()`. When EpiDISH runs standalone
+(`rundish("dir/")`) the proportions get merged via the same
+left-join logic. Both paths produce equivalent merged sheets.
+
+**Custom references.** Pass any EpiDISH reference name as a string
+via `ref`, or set it as the default:
+
+```r
+# Brain (Guintivano et al. 2013)
+rundish("results/brain", ref = "BrainDMC")
+
+# Run a non-EpiDISH custom reference outside methylQC
 library(EpiDISH)
 betas <- readRDS("results/betas_all.rds")
-
-# Brain (Guintivano et al. 2013, Epigenetics 8(3):290-302)
-data(BrainDMC, package = "EpiDISH")
-result <- epidish(beta.m = betas, ref.m = BrainDMC, method = "RPC")$estF
-
-# Custom reference
 custom_ref <- as.matrix(read.csv("my_reference.csv", row.names = 1))
 overlap <- intersect(rownames(betas), rownames(custom_ref))
 result <- epidish(beta.m = betas[overlap, ],
                   ref.m  = custom_ref[overlap, ],
                   method = "RPC")$estF
 ```
+
+**Opting out of in-pipeline EpiDISH.** Pass `dish = FALSE` to
+`prep()` or `pipeline()`; then run `rundish()` standalone afterwards
+on whichever directories you want, with whichever reference.
 
 ### 3.5 Consolidated sample sheet
 
@@ -605,15 +652,14 @@ the primary name is absent (e.g. `donoraliases`, `sexaliases`).
 | `intmin`     | 1300    | Sample is flagged low-intensity if `mean_intensity < intmin` (strict).                        |
 | `detp`       | 0.05    | A probe passes detection at `detP <= detp`; fails at `detP > detp`.                           |
 | `ntop`       | 100000  | Number of top-variance probes used by PCA (page 9). MDS (page 3) uses **all** cg/ch non-sex.  |
-| `failmin`    | 0.10    | Page-2 CSV cutoff: probes with `fail_rate >= failmin` written to `failed_probes.csv`; dashed vertical line on the plot. Matches meffil's `detectionp.cpgs.threshold`. |
+| `failmin`    | 0.05    | Page-2 CSV cutoff: probes with `fail_rate >= failmin` written to `failed_probes.csv`; dashed vertical line on the plot. Matches meffil's `detectionp.cpgs.threshold`. |
 | `inclqual`   | `FALSE` | Page-2 setting: include quality-masked probes in the failure histogram if `TRUE`.             |
 | `cores`      | 1       | Cores for SeSAMe (kept low because streaming is per-sample).                                  |
 | `savesdf`    | `FALSE` | Persist the full SigDF list to disk (memory-expensive).                                       |
 | `collapse`   | `FALSE` | Collapse EPICv2 replicates to prefix.                                                         |
 | `collapsemethod` | `"mean"` | `"mean"` or `"minPvalue"`.                                                                |
-| `dishref`    | `"centDHSbloodDMC.m"` | EpiDISH reference dataset.                                                       |
-| `dishmethod` | `"RPC"` | EpiDISH method.                                                                               |
-| `bloodtypes` | (see source) | Cell-type labels that trigger EpiDISH.                                                   |
+| `dishref`    | `list(EPIC = "cent12CT.m", "450k" = "cent12CT450k.m")` | EpiDISH reference. Single string OR named-by-platform list. Default = 12-cell Salas 2022. Set `mqcset(dishref = "centDHSbloodDMC.m")` for the legacy 7-cell reference. |
+| `dishmethod` | `"RPC"` | EpiDISH method. |
 
 ### 5.3 Changing thresholds
 
@@ -780,8 +826,9 @@ What it checks:
   `sesameData::sesameDataGet("genomeInfo.hg38")` as a tracer; failure
   means the cache is not initialised. Fix:
   `sesameData::sesameDataCacheAll()`.
-- **EpiDISH reference panel** — checks that `mqcopts()$dishref`
-  (default `"centDHSbloodDMC.m"`) is loadable from the installed
+- **EpiDISH reference panel(s)** — checks that every reference name
+  in `mqcopts()$dishref` (default: `cent12CT.m`, `cent12CT450k.m`) is
+  loadable from the installed
   EpiDISH.
 
 Return value: invisibly, `list(ok = <logical>, problems = <character>)`.
@@ -831,10 +878,10 @@ clipped spike's count is reported in the subtitle. A dashed line at
 `failmin` marks the CSV cutoff; the tail probes themselves continue
 to be exported to `failed_probes.csv` unchanged.
 
-**`failmin = 0.10` default.** The defensible range across mainstream
+**`failmin = 0.05` default.** The defensible range across mainstream
 EWAS packages is 0% (ChAMP, minfi traditional) through 10% (meffil's
 `detectionp.cpgs.threshold = 0.1`), with intermediate choices at 5%
-(DNAmArray workflow). 10% is the liberal end of that range and is
+(DNAmArray workflow). 5% is the moderate end of that range and is
 appropriate when k-NN imputation is available downstream: at typical
 EWAS cohort sizes (n ≳ 100), `cleanmat(..., impute = TRUE)` recovers
 the per-probe NAs from the `mask` / `detP` matrices reliably, so the

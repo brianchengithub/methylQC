@@ -13,6 +13,7 @@ prepcell(
   outdir,
   mask = NULL,
   detP = NULL,
+  dish = TRUE,
   ...
 )
 }

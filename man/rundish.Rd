@@ -2,22 +2,95 @@
 % Please edit documentation in R/epidish.R
 \name{rundish}
 \alias{rundish}
-\title{Run EpiDISH deconvolution on a beta matrix}
+\title{Run EpiDISH cell-type deconvolution}
 \usage{
-rundish(betas, ref = NULL, method = NULL, logger = NULL)
+rundish(
+  betas,
+  platform = NULL,
+  ref = NULL,
+  method = NULL,
+  samples = NULL,
+  celltype = NULL,
+  logger = NULL
+)
 }
 \arguments{
-\item{betas}{Beta matrix (probes x samples).}
+\item{betas}{Either a numeric beta matrix (probes x samples) or
+a length-1 string giving a Stage 2 output directory path.}
 
-\item{ref}{EpiDISH reference dataset name. Default: \code{dishref} option.}
+\item{platform}{Platform string (e.g. \code{"EPIC"}, \code{"450k"}).
+Required when \code{ref} is \code{NULL} and the configured
+\code{dishref} is a list. For the on-disk form, defaults to the
+value in \code{metadata.rds}.}
 
-\item{method}{EpiDISH method. Default: \code{dishmethod} option ("RPC").}
+\item{ref}{Reference dataset name (single string). Overrides
+\code{mqcopts()$dishref}.}
 
-\item{logger}{Optional logger.}
+\item{method}{EpiDISH method. Default: \code{mqcopts()$dishmethod}
+(\code{"RPC"}).}
+
+\item{samples}{(On-disk form only.) Character vector of sample IDs
+to restrict to. \code{NULL} = every sample in
+\code{betas_all.rds}.}
+
+\item{celltype}{(On-disk form only.) Cell-type label to restrict to,
+matched case-insensitively against the cell-type column resolved
+via the \code{cellcol}/\code{cellaliases} options. \code{NULL} =
+no filter.}
+
+\item{logger}{Optional logger from \code{\link{makelog}}. For the
+on-disk form, if NULL one is opened in the output directory.}
 }
 \value{
-Cell-type proportion matrix (samples x cell types).
+The cell-proportion matrix (samples x cell types). For the
+on-disk form, returned invisibly along with the file side
+effects.
 }
 \description{
-Run EpiDISH deconvolution on a beta matrix
+Single user-facing function with two calling forms. Dispatches on
+the first argument:
+}
+\details{
+\describe{
+\item{\code{rundish(<matrix>, ...)}}{In-memory. Takes a beta
+matrix (probes x samples) and returns the
+sample-by-cell-type proportion matrix. No files written.}
+\item{\code{rundish("<dir>", ...)}}{On-disk standalone. Loads
+\code{betas_all.rds} (and \code{metadata.rds},
+\code{sample_sheet.csv}) from \code{dir}, optionally restricts
+to a subset of samples or to one cell-type label, runs the
+in-memory primitive, writes \code{cell_proportions.csv}, and
+left-joins the proportions into \code{sample_sheet.csv}. The
+proportion matrix is returned invisibly.}
+}
+
+Reference: by default \code{mqcopts()$dishref} resolves to
+\code{cent12CT.m} on EPIC and \code{cent12CT450k.m} on 450k (the
+Salas et al. 2022 12-cell reference). Pass \code{ref =
+"centDHSbloodDMC.m"} for the legacy 7-cell reference.
+
+There is no built-in tissue allowlist. The caller decides which
+samples to run on. The function refuses (errors) only when the
+reference's CpGs do not sufficiently overlap the input matrix
+(< 50 probes), which is a data-level check.
+}
+\examples{
+\dontrun{
+# ---- In-memory ----
+betas <- readRDS("results/PBMC/betas_all.rds")
+props <- rundish(betas, platform = "EPIC")
+
+# ---- Standalone on a Stage 2 output directory ----
+# Default: 12-cell reference, all samples
+rundish("results/PBMC")
+
+# Restrict to one cell-type label within a top-level Stage 1 dir
+rundish("results", celltype = "BM")        # "BM" here = B-memory
+
+# Restrict to a sample subset
+rundish("results", samples = c("S1", "S5", "S12"))
+
+# Override reference (legacy 7-cell)
+rundish("results/PBMC", ref = "centDHSbloodDMC.m")
+}
 }

@@ -1,5 +1,6 @@
 # methylQC
 
+
 **QC and preprocessing pipeline for Illumina DNA methylation arrays.**
 
 `methylQC` wraps [SeSAMe](https://bioconductor.org/packages/sesame/),
@@ -11,6 +12,7 @@ The pipeline outputs **raw (unmasked) matrices** alongside a quality
 mask and detection p-values; nothing is excluded automatically.
 `cleanmat()` is the single function that turns those matrices into a
 filtered analysis matrix, on the user's terms.
+
 
 ## Features
 
@@ -27,8 +29,11 @@ filtered analysis matrix, on the user's terms.
 - **Nine-page QC report PDF**: detection rate, probe-failure tail
   histogram, MDS, intensity, sample beta density, sex check, age
   check, scree, and a 2×3 panel of PC-vs-associated-variable plots.
-- **Cell-type deconvolution** (EpiDISH RPC) for blood-derived
-  tissues.
+- **Cell-type deconvolution** (`rundish()`) via EpiDISH RPC. Default
+  reference is the 12-cell Salas 2022 panel (`cent12CT.m` on EPIC,
+  `cent12CT450k.m` on 450k). Runs as part of the pipeline by default,
+  or standalone on a Stage 2 output directory; either way, the
+  proportions are merged into `sample_sheet.csv`.
 - **`cleanmat()`** — single primitive for applying QC decisions, with optional
   chunked k-NN imputation.
 
@@ -110,7 +115,7 @@ betas_clean <- cleanmat(
 | `qc_plots.pdf`               | Nine-page QC diagnostic report (Stage 2).                                |
 | `pc_scores.csv`              | All PC scores from the page-9 PCA (Stage 2).                             |
 | `failed_probes.csv`          | Probes failing in ≥ `failmin` fraction of samples (Stage 2).             |
-| `cell_proportions.csv`       | EpiDISH proportions, blood tissues only (Stage 2).                       |
+| `cell_proportions.csv`       | EpiDISH proportions (Stage 2 if `dish = TRUE`, or any time via `rundish("dir/")`). |
 | `pipeline_diagnostics.log`   | Per-step log (timestamps, parameter values, summary stats).              |
 
 There is **no** `exclude_samples.csv`, **no** `exclude_probes.csv`,
@@ -150,6 +155,42 @@ betas_snp <- cleanmat(
 `probes` accepts any subset of `c("cg", "ch", "sex", "snp", "other")`,
 or `NULL` to keep all probes. `"cg"` always means autosomal CpG; sex
 chromosome cg probes live in `"sex"`.
+
+## `rundish()` in one screen
+
+Single function with two calling forms — dispatches on the first
+argument's type.
+
+```r
+# In-memory: returns the proportion matrix, no I/O
+betas <- readRDS("results/PBMC/betas_all.rds")
+props <- rundish(betas, platform = "EPIC")
+
+# On-disk: writes cell_proportions.csv AND merges columns into
+# sample_sheet.csv in the same directory; returns props invisibly
+rundish("results/PBMC")
+
+# Filter to one sample-sheet cell-type label
+rundish("results", celltype = "BM")          # e.g. "BM" = B-memory
+
+# Filter to a sample ID subset
+rundish("results", samples = c("S1", "S5", "S12"))
+
+# Override reference (legacy 7-cell instead of 12-cell default)
+rundish("results/PBMC", ref = "centDHSbloodDMC.m")
+
+# Skip in the main pipeline and run standalone afterwards
+prep(dir = "results", dish = FALSE)
+rundish("results/PBMC")
+rundish("results/BM")
+```
+
+There is no built-in tissue allowlist. `rundish()` errors only if the
+reference's CpGs don't overlap the input matrix (< 50 probes). Caller
+chooses which cell types to deconvolve.
+
+In-pipeline and standalone produce equivalent merged `sample_sheet.csv`
+files.
 
 ## Design
 

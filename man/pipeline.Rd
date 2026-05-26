@@ -4,7 +4,7 @@
 \alias{pipeline}
 \title{End-to-end pipeline}
 \usage{
-pipeline(indir, outdir, platform = NULL, bycell = TRUE, ...)
+pipeline(indir, outdir, platform = NULL, bycell = TRUE, dish = TRUE, ...)
 }
 \arguments{
 \item{indir}{Input directory (passed to \code{\link{qc}}).}
@@ -15,6 +15,10 @@ the Stage 1 directory for \code{\link{prep}}).}
 \item{platform}{Optional platform string.}
 
 \item{bycell}{If TRUE, Stage 2 splits by cell type.}
+
+\item{dish}{If TRUE (default), run EpiDISH deconvolution per cell
+type during Stage 2. Set to FALSE to skip; call
+\code{\link{rundish}} on the output directory afterwards.}
 
 \item{...}{Option overrides forwarded to \code{\link{mqcset}}.}
 }

@@ -1,3 +1,11 @@
+(138/255)/(146/1819)
+138*1819/(255*146)
+(138/1819)*(146/1965)
+(138/393)/(146/1965)
+q()
+library(sesame)
+idathpath_muscle = "/Users/bc/Documents/molina/gestalt/Methylation/Muscle/"#
+idathpath_pbmc = "/Users/bc/Documents/molina/gestalt/Methylation/PBMC/"
 beta_muscle = openSesame(idathpath_muscle, func=getBetas, prep="CDB", BPPARM=BiocParallel::MulticoreParam(6))
 beta_muscle = openSesame(idathpath_muscle, func=getBetas, prep="CDB", BPPARAM=BiocParallel::MulticoreParam(6))
 urlpath = "https://www2.census.gov/programs-surveys/popest/datasets/2020-2022/state/asrh/sc-est2022-alldata6.csv"#
@@ -2208,30 +2216,6 @@ installed.packages("EpiDISH")["packageName", "Version"]
 installed.packages()["EpiDISH", "Version"]
 library(methylQC)
 prep(stage1_dir = "/Users/bc/Documents/gestalt/analysis/qc/Muscle/")
-setwd('/Users/bc/Documents/GitHub/methylQC/
-')
-setwd('/Users/bc/Documents/GitHub/methylQC')
+setwd("/Users/bc/Documents/GitHub/methylQC")
+devtools::documents()
 devtools::document()
-pak::pak("brianchengithub/methylQC")
-# Load library#
-library(methylQC)#
-# BM#
-result = pipeline(#
- indir = "/Users/bc/Documents/gestalt/idats/BM",#
- outdir = "/Users/bc/Documents/gestalt/analysis/qc/BM"#
-)#
-#
-rm(list=ls()); gc(full=TRUE);
-devtools::document()
-pak::pak("brianchengithub/methylQC")
-# Load library#
-library(methylQC)#
-# BM#
-result = pipeline(#
- indir = "/Users/bc/Documents/gestalt/idats/BM",#
- outdir = "/Users/bc/Documents/gestalt/analysis/qc/BM"#
-)
-mqcreset()                       # cleanest — resets all methylQC.* options to NULL#
-# or#
-mqcset(failmin = 0.05)           # set the one option explicitly#
-# or restart R after reinstalling

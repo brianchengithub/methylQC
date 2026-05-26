@@ -85,20 +85,26 @@ checkdeps <- function(quiet = FALSE) {
 
   # --- Default EpiDISH reference panel ---
   if (requireNamespace("EpiDISH", quietly = TRUE)) {
-    ref <- mqcopts()$dishref
-    ref1 <- ref[1]
-    ref_ok <- tryCatch({
-      e <- new.env()
-      suppressWarnings(utils::data(list = ref1, package = "EpiDISH", envir = e))
-      exists(ref1, envir = e)
-    }, error = function(e) FALSE)
-    if (ref_ok) {
-      note(sprintf("  EpiDISH reference '%s': OK", ref1))
-    } else {
-      note(sprintf("  EpiDISH reference '%s': NOT FOUND", ref1))
-      problems <- c(problems, sprintf(paste0(
-        "EpiDISH reference '%s' is not available in your EpiDISH ",
-        "install. Update EpiDISH: BiocManager::install(\"EpiDISH\")"), ref1))
+    dr <- mqcopts()$dishref
+    # Flatten to a character vector of reference names to check.
+    refs <- if (is.list(dr)) unique(unlist(dr, use.names = FALSE))
+            else             unique(as.character(dr))
+    for (ref1 in refs) {
+      ref_ok <- tryCatch({
+        e <- new.env()
+        suppressWarnings(utils::data(list = ref1, package = "EpiDISH",
+                                     envir = e))
+        exists(ref1, envir = e)
+      }, error = function(e) FALSE)
+      if (ref_ok) {
+        note(sprintf("  EpiDISH reference '%s': OK", ref1))
+      } else {
+        note(sprintf("  EpiDISH reference '%s': NOT FOUND", ref1))
+        problems <- c(problems, sprintf(paste0(
+          "EpiDISH reference '%s' is not available in your EpiDISH ",
+          "install. Update EpiDISH: BiocManager::install(\"EpiDISH\")"),
+          ref1))
+      }
     }
   }
 

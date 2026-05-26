@@ -120,7 +120,7 @@ qc <- function(indir, outdir, platform = NULL, ...) {
 #' @return Invisibly, the number of samples in the slice.
 #' @export
 prepcell <- function(celltype, betas, mvals, ss, platform, outdir,
-                     mask = NULL, detP = NULL, ...) {
+                     mask = NULL, detP = NULL, dish = TRUE, ...) {
   old_opts <- mqcset(...)
   if (length(old_opts) > 0) on.exit(do.call(options, old_opts), add = TRUE)
   cfg <- mqcopts()
@@ -170,16 +170,28 @@ prepcell <- function(celltype, betas, mvals, ss, platform, outdir,
   n_age_out <- length(qc_flags$age_outlier_ids)
 
   # --- EpiDISH on raw (unmasked) betas ---
-  resolved_ct <- infer_cell_type_label(celltype, ss, cfg, logger)
+  # Skipped if dish = FALSE. There is no tissue allowlist: rundish()
+  # decides on its own (it errors if the reference's CpGs don't
+  # overlap the matrix). Caller controls which cell types to run.
   cell_props <- NULL
-  if (is_blood_tissue(resolved_ct, cfg$bloodtypes)) {
-    cell_props <- rundish(betas, logger = logger)
-    utils::write.csv(data.frame(sample_id = colnames(betas), cell_props,
-                                check.names = FALSE),
-                     file.path(outdir, "cell_proportions.csv"),
-                     row.names = FALSE)
+  if (!isTRUE(dish)) {
+    logger$log("rundish",
+               sprintf("skipping EpiDISH (dish = FALSE) for '%s'", celltype))
   } else {
-    logger$log("rundish", sprintf("skipping EpiDISH for '%s'", resolved_ct))
+    cell_props <- tryCatch(
+      rundish(betas, platform = platform, logger = logger),
+      error = function(e) {
+        logger$log("rundish",
+                   sprintf("EpiDISH skipped for '%s': %s",
+                           celltype, conditionMessage(e)))
+        NULL
+      })
+    if (!is.null(cell_props)) {
+      utils::write.csv(data.frame(sample_id = colnames(betas), cell_props,
+                                  check.names = FALSE),
+                       file.path(outdir, "cell_proportions.csv"),
+                       row.names = FALSE)
+    }
   }
 
   # --- Consolidated sample sheet ---
@@ -319,35 +331,20 @@ build_consolidated_sample_sheet <- function(ss, flags, qc_flags,
   out
 }
 
-#' Infer cell-type label from sample sheet
-#' @keywords internal
-#' @noRd
-infer_cell_type_label <- function(celltype, ss, cfg, logger = NULL) {
-  if (!is.null(celltype) && celltype != "all") return(celltype)
-  cell_col <- resolve_column(colnames(ss), cfg$cellcol, cfg$cellaliases)
-  if (!is.na(cell_col)) {
-    vals <- stats::na.omit(ss[[cell_col]])
-    if (length(vals) > 0) {
-      dom <- names(sort(table(vals), decreasing = TRUE))[1]
-      if (!is.null(logger))
-        logger$log("rundish",
-                   sprintf("inferred '%s' from '%s'", dom, cell_col))
-      return(dom)
-    }
-  }
-  if (!is.null(logger))
-    logger$log("rundish", "could not infer cell type")
-  celltype
-}
-
 #' Stage 2 wrapper: optionally split by cell type
 #'
 #' @param dir Stage 1 output directory.
 #' @param platform Optional platform; defaults to value in metadata.rds.
 #' @param bycell If TRUE, split processing by detected cell type.
+#' @param dish If TRUE (default), run EpiDISH deconvolution within each
+#'   prepcell() call. There is no built-in tissue allowlist; rundish()
+#'   errors gracefully (and is caught) if the configured reference's
+#'   CpGs don't sufficiently overlap the matrix. Set FALSE to skip
+#'   entirely and call \code{\link{rundish}} on the output directory
+#'   afterwards.
 #' @param ... Option overrides forwarded to \code{\link{mqcset}}.
 #' @export
-prep <- function(dir, platform = NULL, bycell = TRUE, ...) {
+prep <- function(dir, platform = NULL, bycell = TRUE, dish = TRUE, ...) {
   cfg <- mqcopts()
   metadata <- readRDS(file.path(dir, "metadata.rds"))
   if (is.null(platform)) platform <- metadata$platform
@@ -372,7 +369,7 @@ prep <- function(dir, platform = NULL, bycell = TRUE, ...) {
     prepcell("all",
              betas[, ids, drop = FALSE], mvals[, ids, drop = FALSE],
              ss[match(ids, ss$sample_id), ],
-             platform, dir, mask = mask_s, detP = detP_s, ...)
+             platform, dir, mask = mask_s, detP = detP_s, dish = dish, ...)
     rm(betas, mvals, mask_s, detP_s); gc(verbose = FALSE)
     return(invisible(NULL))
   }
@@ -412,7 +409,7 @@ prep <- function(dir, platform = NULL, bycell = TRUE, ...) {
                             ba[, ids, drop = FALSE], ma[, ids, drop = FALSE],
                             ss[match(ids, ss$sample_id), ],
                             platform, file.path(dir, ct),
-                            mask = mask_s, detP = detP_s, ...),
+                            mask = mask_s, detP = detP_s, dish = dish, ...),
                    error = function(e) {
                      message("  ERROR: ", e$message); NA_integer_
                    })
@@ -440,12 +437,16 @@ prep <- function(dir, platform = NULL, bycell = TRUE, ...) {
 #'   the Stage 1 directory for \code{\link{prep}}).
 #' @param platform Optional platform string.
 #' @param bycell If TRUE, Stage 2 splits by cell type.
+#' @param dish If TRUE (default), run EpiDISH deconvolution per cell
+#'   type during Stage 2. Set to FALSE to skip; call
+#'   \code{\link{rundish}} on the output directory afterwards.
 #' @param ... Option overrides forwarded to \code{\link{mqcset}}.
 #' @export
-pipeline <- function(indir, outdir, platform = NULL, bycell = TRUE, ...) {
+pipeline <- function(indir, outdir, platform = NULL, bycell = TRUE,
+                     dish = TRUE, ...) {
   message("=== Running end-to-end pipeline ===")
   qc(indir = indir, outdir = outdir, platform = platform, ...)
-  prep(dir = outdir, platform = platform, bycell = bycell, ...)
+  prep(dir = outdir, platform = platform, bycell = bycell, dish = dish, ...)
 }
 
 #' @keywords internal
