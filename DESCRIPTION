@@ -1,40 +1,50 @@
 Package: methylQC
-Title: QC and Preprocessing Pipeline for Illumina DNA Methylation Arrays
-Version: 2.0.1
+Type: Package
+Title: Quality Control and Preprocessing for Illumina DNA Methylation Arrays
+Version: 3.0.1
+Date: 2026-08-16
 Authors@R: person("Brian", "Chen", role = c("aut", "cre"),
                   email = "brianchen450k@gmail.com")
-Description: Two-stage QC pipeline for Illumina Infinium DNA methylation
-    arrays (EPIC, EPICv2, 450K). Stage 1 streams samples through SeSAMe
-    openSesame, computes per-sample QC metrics (detection rate, intensity,
-    Horvath epigenetic age, sex chromosome intensities), and extracts SNP
-    probe betas. Stage 2 flags samples (for plot colouring only), produces
-    a multi-page QC report PDF, runs EpiDISH cell-type deconvolution for
-    blood tissues, and outputs a consolidated sample sheet. No samples or
-    probes are removed automatically. Raw matrices are output with separate
-    quality-mask and detection-p-value matrices; users apply their own
-    exclusion criteria via applymask(), which supports optional k-NN
-    imputation.
+Description: A two-stage quality control and preprocessing pipeline for
+    Illumina Infinium DNA methylation BeadChips (HM450, EPIC v1, EPIC v2,
+    MSA and mouse arrays), built on the sesame Bioconductor package.
+    Stage 1 reads IDAT pairs, applies channel inference, dye bias
+    correction and noob background correction, and computes ELBAR
+    detection p-values. Stage 2 derives sample- and probe-level quality
+    metrics, calls sex from sex-chromosome intensity, estimates cell
+    composition and epigenetic age, and produces a QC report. Beta values
+    are stored unmasked; the probe design mask and the detection p-values
+    are stored separately so that any masking policy can be applied
+    downstream without reprocessing.
 License: MIT + file LICENSE
 Encoding: UTF-8
-Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
+LazyData: false
 Depends:
-    R (>= 4.1.0)
+    R (>= 4.2.0)
 Imports:
-    sesame,
-    sesameData,
-    dplyr,
-    ggplot2,
-    gridExtra,
-    matrixStats,
-    impute,
-    EpiDISH,
-    methods,
-    stats,
-    utils,
+    BiocParallel,
+    ggplot2 (>= 3.4.0),
     grDevices,
-    graphics
+    methods,
+    parallel,
+    sesame (>= 1.20.0),
+    sesameData (>= 1.16.0),
+    stats,
+    tools,
+    utils
 Suggests:
-    testthat (>= 3.0.0),
-    GenomicRanges,
-    BiocParallel
+    EpiDISH,
+    GenomeInfoDb,
+    matrixStats,
+    EPICv2manifest,
+    knitr,
+    readxl,
+    rmarkdown,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
+OS_type: unix
+SystemRequirements: macOS or Linux. Parallel execution uses forking via
+    BiocParallel::MulticoreParam and is not available on Windows.
+RoxygenNote: 7.3.3
+URL: https://github.com/brianchengithub/methylQC
+BugReports: https://github.com/brianchengithub/methylQC/issues

@@ -1,54 +1,56 @@
-###############################################################################
-# methylQC-package.R - Package-level documentation
-#
-# This file provides the top-level help page for the methylQC package,
-# accessible via ?methylQC or help(package = "methylQC"). It is parsed
-# by roxygen2 to generate the package .Rd file.
-###############################################################################
-#' methylQC: Illumina Methylation Array QC and Preprocessing
+#' methylQC: Quality Control for Illumina DNA Methylation Arrays
 #'
-#' A reproducible pipeline for Illumina methylation array data using
-#' SeSAMe for preprocessing, EpiDISH for cell-type deconvolution
-#' (blood tissues), and inline QC diagnostics. Samples and probes are
-#' never removed automatically: the package produces flags and a
-#' diagnostic report, and the user applies exclusions via
-#' \code{\link{cleanmat}}.
+#' A two-stage quality control and preprocessing pipeline for Illumina
+#' Infinium DNA methylation BeadChips, built on \pkg{sesame}.
 #'
-#' @section Quick start:
+#' @section Design principles:
+#'
+#' \strong{Values are stored unmasked.} \code{betas_all.rds} contains every
+#' probe for every sample with no \code{NA} introduced by masking. Masking is a
+#' view applied at the point of use by \code{\link{cleanmat}}, under a policy
+#' the caller chooses.
+#'
+#' \strong{The two mask types are stored separately.} The design mask is a
+#' platform property, identical for every sample, kept as a named logical
+#' vector. Detection is kept as the full matrix of ELBAR p-values rather than
+#' as a thresholded mask, so the threshold is a decision made downstream. A
+#' probe masked by design can therefore be recovered together with its
+#' detection status, which matters for epigenetic clocks and other published
+#' probe sets that include design-masked probes.
+#'
+#' \strong{Detection is computed once, in the right place.} ELBAR runs between
+#' dye bias correction and noob. noob rewrites the signal columns from which
+#' the background estimate is drawn, so a detection calculation performed
+#' afterwards does not correspond to the mask it is meant to explain.
+#'
+#' \strong{Failures fail closed.} A sample that could not be assessed is given
+#' an all-failed detection profile and is flagged, never silently passed.
+#'
+#' @section Typical use:
 #' \preformatted{
 #' library(methylQC)
 #'
-#' # Stage 1: QC and preprocessing (auto-detects platform)
-#' stage1 <- qc(
-#'   indir  = "data/idats",
-#'   outdir = "results"
-#' )
+#' pipeline("~/idats", "~/qcout")    # everything, in one call
 #'
-#' # Review the QC PDF in results/, then run Stage 2:
+#' qcplan("~/idats")                 # preflight only: memory, workers, batch
+#' qcplots("~/qcout", detp = 0.01)   # retune thresholds, seconds not minutes
 #'
-#' # Stage 2: per-cell-type flagging, EpiDISH, consolidated sheet
-#' stage2 <- prep(dir = "results")
+#' betas <- readRDS(file.path("~/qcout", "data/matrices/betas_all.rds"))
+#' detp  <- readRDS(file.path("~/qcout", "data/matrices/detP_all.rds"))
+#' dm    <- readRDS(file.path("~/qcout", "data/matrices/design_mask.rds"))
 #'
-#' # To act on flags, point cleanmat() at the QC artifacts directly:
-#' detP  <- readRDS("results/detP_all.rds")
-#' mask  <- readRDS("results/mask_all.rds")
-#' betas <- readRDS("results/betas_all.rds")
-#' flagged <- flagsamples(detP, callrate = 0.95,
-#'                        csv = "results/flagged_samples.csv")
-#' betas_clean <- cleanmat(
-#'   betas, mask = mask, detP = detP,
-#'   dropprobes  = "results/failed_probes.csv",   # CSV path or character vec
-#'   dropsamples = "results/flagged_samples.csv", # CSV path or character vec
-#'   probes      = c("cg", "ch"),
-#'   platform    = "EPIC",
-#'   impute      = TRUE)
+#' clean <- cleanmat(betas, detp, dm, maskuse = "both")
+#' m     <- mvals(clean)
 #' }
 #'
-#' @section Configuration:
-#' All tunable parameters are stored as package options with the prefix
-#' \code{methylQC.}. See \code{\link{mqcdefaults}} for the full list
-#' and \code{\link{mqcopts}} / \code{\link{mqcset}} to inspect or
-#' override them.
+#' @section Where to start:
+#' \code{\link{pipeline}} runs everything in one call. \code{\link{qcplan}},
+#' \code{\link{qc}}, \code{\link{prep}} and \code{\link{qcplots}} are the
+#' individual stages, for re-running one of them without the others.
 #'
 #' @keywords internal
+#' @importFrom ggplot2 .data
+#' @importFrom stats setNames
+#' @importFrom utils packageVersion
+#' @importFrom methods is
 "_PACKAGE"

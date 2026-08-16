@@ -2,16 +2,19 @@
 % Please edit documentation in R/config.R
 \name{mqcopts}
 \alias{mqcopts}
-\title{Get current methylQC configuration}
+\title{Get current methylQC options}
 \usage{
 mqcopts(...)
 }
 \arguments{
-\item{...}{Named overrides to apply temporarily to the returned list.}
+\item{...}{optional option names; if given, only those are returned.}
 }
 \value{
-A named list of all current options.
+a named list of the currently active options.
 }
 \description{
-Get current methylQC configuration
+Get current methylQC options
+}
+\examples{
+mqcopts("detp", "maskuse")
 }

@@ -2,26 +2,34 @@
 % Please edit documentation in R/pipeline.R
 \name{prep}
 \alias{prep}
-\title{Stage 2 wrapper: optionally split by cell type}
+\title{Stage 2: metrics, flags, sex, cell composition, age and the QC report}
 \usage{
-prep(dir, platform = NULL, bycell = TRUE, dish = TRUE, ...)
+prep(dir, s1 = NULL, cols = NULL, info = NULL, collapse = NULL, logger = NULL)
 }
 \arguments{
-\item{dir}{Stage 1 output directory.}
+\item{dir}{an output directory produced by \code{\link{qc}}.}
 
-\item{platform}{Optional platform; defaults to value in metadata.rds.}
+\item{s1}{in-memory Stage 1 results; read from disk when \code{NULL}.}
 
-\item{bycell}{If TRUE, split processing by detected cell type.}
+\item{cols}{resolved metadata column names.}
 
-\item{dish}{If TRUE (default), run EpiDISH deconvolution within each
-prepcell() call. There is no built-in tissue allowlist; rundish()
-errors gracefully (and is caught) if the configured reference's
-CpGs don't sufficiently overlap the matrix. Set FALSE to skip
-entirely and call \code{\link{rundish}} on the output directory
-afterwards.}
+\item{info}{run facts for METHODS.txt; read from \code{run_info.rds} when
+\code{NULL}.}
 
-\item{...}{Option overrides forwarded to \code{\link{mqcset}}.}
+\item{collapse}{collapse EPICv2 replicates before Stage 2; \code{NA}
+decides automatically. Use this after \code{makemat()} on an
+\code{extreme = TRUE} run.}
+
+\item{logger}{optional logger.}
+}
+\value{
+\code{dir}, invisibly.
 }
 \description{
-Stage 2 wrapper: optionally split by cell type
+Stage 2: metrics, flags, sex, cell composition, age and the QC report
+}
+\examples{
+\dontrun{
+prep("~/qcout")
+}
 }

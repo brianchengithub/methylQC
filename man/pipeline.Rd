@@ -2,26 +2,35 @@
 % Please edit documentation in R/pipeline.R
 \name{pipeline}
 \alias{pipeline}
-\title{End-to-end pipeline}
+\title{Run the whole pipeline in one call}
 \usage{
-pipeline(indir, outdir, platform = NULL, bycell = TRUE, dish = TRUE, ...)
+pipeline(indir, outdir, ..., quiet = FALSE)
 }
 \arguments{
-\item{indir}{Input directory (passed to \code{\link{qc}}).}
+\item{indir}{directory containing IDAT files.}
 
-\item{outdir}{Output directory (passed to \code{\link{qc}} and used as
-the Stage 1 directory for \code{\link{prep}}).}
+\item{outdir}{destination directory; created if absent.}
 
-\item{platform}{Optional platform string.}
+\item{...}{passed to \code{\link{qc}}, e.g. \code{workers}, \code{batch},
+\code{extreme}, \code{savesdf}, \code{platform}, \code{sheet}.}
 
-\item{bycell}{If TRUE, Stage 2 splits by cell type.}
-
-\item{dish}{If TRUE (default), run EpiDISH deconvolution per cell
-type during Stage 2. Set to FALSE to skip; call
-\code{\link{rundish}} on the output directory afterwards.}
-
-\item{...}{Option overrides forwarded to \code{\link{mqcset}}.}
+\item{quiet}{suppress the printed summary.}
+}
+\value{
+the output directory, invisibly.
 }
 \description{
-End-to-end pipeline
+Preflights the run, processes every IDAT pair, derives quality metrics,
+calls sex, estimates cell composition and epigenetic age, writes the QC
+report, and prints a short summary of what was produced.
+}
+\details{
+This is the entry point to reach for. \code{\link{qc}}, \code{\link{prep}}
+and \code{\link{qcplots}} remain available for re-running one stage.
+}
+\examples{
+\dontrun{
+pipeline("~/idats", "~/qcout")
+pipeline("~/idats", "~/qcout", workers = 4)
+}
 }

@@ -2,45 +2,55 @@
 % Please edit documentation in R/preprocess.R
 \name{runsesame}
 \alias{runsesame}
-\title{Run openSesame and extract unmasked betas, mask, and detection p-values}
+\title{Preprocess a cohort of IDAT pairs}
 \usage{
 runsesame(
-  basenames,
+  ss,
   platform,
-  cores = NULL,
-  collapse = NULL,
-  collapsemethod = NULL,
-  keepsdf = FALSE,
+  outdir,
+  workers = NULL,
+  batch = NULL,
+  extreme = NULL,
+  savesdf = NULL,
+  memcap = NULL,
   logger = NULL
 )
 }
 \arguments{
-\item{basenames}{Character vector of IDAT basenames.}
+\item{ss}{sample sheet from \code{\link{discover}}; needs \code{sample_id}
+and \code{Basename}.}
 
-\item{platform}{Platform string (e.g. \code{"EPIC"}).}
+\item{platform}{platform string.}
 
-\item{cores}{Number of cores. Default: \code{cores} option (1, streaming).}
+\item{outdir}{output directory (used for per-batch files and checkpoints).}
 
-\item{collapse}{Collapse EPICv2 replicates. Default: \code{collapse} option.}
+\item{workers}{number of forked workers; \code{NULL} inherits from the plan.}
 
-\item{collapsemethod}{Collapse method: \code{"mean"} or \code{"minPvalue"}.
-Default: \code{collapsemethod} option.}
+\item{batch}{samples per task; \code{NULL} inherits from the plan.}
 
-\item{keepsdf}{If TRUE, retains the full SigDF list (memory-expensive).}
+\item{extreme}{extreme memory conservation: write per-batch files and never
+hold a full matrix.}
 
-\item{logger}{Optional logger.}
+\item{savesdf}{retain preprocessed SigDF objects.}
+
+\item{memcap}{abort if resident memory exceeds this many bytes;
+\code{NULL} disables the guard.}
+
+\item{logger}{optional logger.}
 }
 \value{
-A list with:
-\describe{
-\item{betas}{Unmasked beta matrix (all probes, no NAs from masking)}
-\item{mvals}{Unmasked M-value matrix}
-\item{mask}{Logical matrix: TRUE = probe failed quality mask or
-detection p-value}
-\item{detP}{Detection p-value matrix (pOOBAH)}
-\item{sdfs}{List of SigDF objects (NULL if \code{keepsdf = FALSE})}
-}
+a list with \code{betas}, \code{detp}, \code{design}, \code{stats},
+  \code{failed}, \code{phist}, \code{pfail} and \code{probe_ids}. Under
+  \code{extreme = TRUE} the matrices are \code{NULL} and batch files are on
+  disk instead.
 }
 \description{
-Run openSesame and extract unmasked betas, mask, and detection p-values
+Runs the three-stage prep chain over every sample, assembling the beta and
+detection p-value matrices plus the design mask and per-sample diagnostics.
+}
+\examples{
+\dontrun{
+ss <- discover("~/idats")
+out <- runsesame(ss, "EPIC", "~/qcout")
+}
 }

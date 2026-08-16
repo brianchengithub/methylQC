@@ -2,16 +2,22 @@
 % Please edit documentation in R/config.R
 \name{mqcset}
 \alias{mqcset}
-\title{Set methylQC options globally}
+\title{Set methylQC options}
 \usage{
 mqcset(...)
 }
 \arguments{
-\item{...}{Named options (e.g., \code{donorcol = "SubjectID"}).}
+\item{...}{named options to set, e.g. \code{mqcset(detp = 0.01)}. Passing
+\code{NULL} restores that option to its default.}
 }
 \value{
-Invisibly, the previous values.
+the previous values of the changed options, invisibly.
 }
 \description{
-Set methylQC options globally
+Set methylQC options
+}
+\examples{
+old <- mqcset(detp = 0.01)
+mqcopts("detp")$detp
+mqcset(detp = old$detp)
 }

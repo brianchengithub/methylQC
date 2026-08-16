@@ -2,21 +2,26 @@
 % Please edit documentation in R/dependencies.R
 \name{checkdeps}
 \alias{checkdeps}
-\title{Verify the methylQC runtime environment}
+\title{Check that required packages and the platform are usable}
 \usage{
-checkdeps(quiet = FALSE)
+checkdeps(parallel = TRUE, stop_on_missing = TRUE)
 }
 \arguments{
-\item{quiet}{If TRUE, suppress the printed report and only return the
-status list invisibly.}
+\item{parallel}{if \code{TRUE}, also check that forking is available.}
+
+\item{stop_on_missing}{raise an error rather than a warning when a required
+package is absent.}
 }
 \value{
-Invisibly, a list with elements \code{ok} (logical) and
-\code{problems} (character vector).
+a list describing what was found, invisibly.
 }
 \description{
-Checks R version, required package availability and versions, the
-SeSAMe data cache, and the presence of the default EpiDISH reference
-panel. Prints a report and, for anything missing or out of date, the
-exact command to fix it. Nothing is installed automatically.
+Verifies that sesame is installed at a version carrying ELBAR, that
+sesameData is present, and that the operating system supports forked
+parallelism. Optional packages are reported but not required.
+}
+\examples{
+\dontrun{
+checkdeps()
+}
 }

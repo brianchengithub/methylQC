@@ -1,454 +1,680 @@
-###############################################################################
-# pipeline.R - Main pipeline orchestration
-#
-# Stage 1 (qc):
-#   - discover() IDATs
-#   - runsesame() to produce betas/mvals/mask/detP
-#   - extract rs probe betas via snpbetas()
-#   - qcmetrics() / qcstream() for per-sample QC
-#   - checkmeta() for metadata cross-checks
-#   - writes betas_all.rds, mvals_all.rds, mask_all.rds, detP_all.rds,
-#     snp_betas.rds, sample_sheet.csv, metadata.rds
-#
-# Stage 2 (prep, prepcell):
-#   - qcflags() for per-sample low-detection / low-intensity flags
-#     (USED ONLY FOR PLOT COLOURING; nothing is excluded automatically)
-#   - qcreport() writes the multi-page QC PDF + pc_scores.csv +
-#     failed_probes.csv
-#   - rundish() for blood tissues
-#   - writes a per-cell-type sample_sheet.csv
-#
-# There is no exclude_samples.csv, exclude_probes.csv, or
-# probe_call_rates.csv. The user applies their own exclusion criteria
-# via cleanmat() and flagsamples().
-###############################################################################
+## ---------------------------------------------------------------------------
+## pipeline.R -- the user-facing entry points.
+##
+## Goal:    take a directory of IDATs to a finished QC report in one call.
+## Approach: two stages behind one front door, with every stage also callable
+##          on its own for re-runs.
+## Inputs:  a directory of IDAT pairs, optionally a sample sheet.
+## Outputs: an output directory (see mqcpath()/utils.R for the layout).
+## Usage:   pipeline("~/idats", "~/qcout")
+##
+##   pipeline() one call: preflight, Stage 1, Stage 2, summary
+##   qcplan()   preflight only: memory, workers, batch size, SigDF retention
+##   qc()       Stage 1 (+ Stage 2 unless stage2 = FALSE)
+##   prep()     Stage 2 alone, against an existing output directory
+##   qcplots()  regenerate the threshold-dependent panels from cache
+##   makemat()  reassemble per-batch matrices written under extreme mode
+##
+## THE SAMPLE SHEET
+## ----------------
+## There is exactly ONE sample_sheet.csv. Stage 1 creates it with discovery
+## information and per-sample diagnostics; Stage 2 adds flag, sex, age and
+## cell composition columns to that same file, for every sample. It is never
+## subset. Columns are assigned rather than joined, so re-running is
+## idempotent and never produces .x/.y duplicates.
+##
+## RUN FACTS
+## ---------
+## Stage 1 writes run_info.rds. Without it a standalone prep() had no idea what
+## Stage 1 did and rewrote METHODS.txt with NA placeholders, a 0.0% design-mask
+## figure and no EPICv2 section.
+## ---------------------------------------------------------------------------
 
-#' Stage 1: Preprocessing and QC metric computation
+#' Run the whole pipeline in one call
 #'
-#' @param indir Input directory containing IDATs (recursive).
-#' @param outdir Output directory (created if needed).
-#' @param platform Optional platform string; auto-detected if NULL.
-#' @param ... Option overrides forwarded to \code{\link{mqcset}}.
-#' @return Invisibly, a list with betas, mvals, mask, detP, sample_sheet,
-#'   platform.
+#' Preflights the run, processes every IDAT pair, derives quality metrics,
+#' calls sex, estimates cell composition and epigenetic age, writes the QC
+#' report, and prints a short summary of what was produced.
+#'
+#' This is the entry point to reach for. \code{\link{qc}}, \code{\link{prep}}
+#' and \code{\link{qcplots}} remain available for re-running one stage.
+#'
+#' @param indir directory containing IDAT files.
+#' @param outdir destination directory; created if absent.
+#' @param ... passed to \code{\link{qc}}, e.g. \code{workers}, \code{batch},
+#'   \code{extreme}, \code{savesdf}, \code{platform}, \code{sheet}.
+#' @param quiet suppress the printed summary.
+#' @return the output directory, invisibly.
 #' @export
-qc <- function(indir, outdir, platform = NULL, ...) {
-  old_opts <- mqcset(...)
-  if (length(old_opts) > 0) on.exit(do.call(options, old_opts), add = TRUE)
-  cfg <- mqcopts()
-  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
-
-  logger <- makelog(outdir)
-  logger$log("start", "=== Stage 1 (qc): preprocessing ===")
-
-  ss <- discover(indir, platform = platform, logger = logger)
-  detected <- unique(stats::na.omit(ss$detected_platform))
-  if (is.null(platform)) {
-    if (length(detected) == 0) stop("Could not auto-detect platform.")
-    if (length(detected) > 1)
-      stop("Inconsistent platforms: ", paste(detected, collapse = ", "))
-    platform <- detected[1]
-    logger$log("start", sprintf("auto-detected platform: %s", platform))
-  }
-
-  saveRDS(list(platform        = platform,
-               indir           = normalizePath(indir, mustWork = FALSE),
-               n_samples       = nrow(ss),
-               n_batches       = length(unique(ss$batch_folder)),
-               stage1_time     = as.character(Sys.time()),
-               package_version = utils::packageVersion("methylQC")),
-          file.path(outdir, "metadata.rds"))
-
-  res <- runsesame(ss$Basename, platform,
-                   keepsdf = cfg$savesdf, logger = logger)
-
-  saveRDS(res$betas, file.path(outdir, "betas_all.rds"))
-  saveRDS(res$mvals, file.path(outdir, "mvals_all.rds"))
-  if (!is.null(res$mask)) saveRDS(res$mask, file.path(outdir, "mask_all.rds"))
-  if (!is.null(res$detP)) saveRDS(res$detP, file.path(outdir, "detP_all.rds"))
-  if (cfg$savesdf && !is.null(res$sdfs))
-    saveRDS(res$sdfs, file.path(outdir, "sdfs_all.rds"))
-
-  rs_mat <- snpbetas(res$betas, logger = logger)
-  if (!is.null(rs_mat)) {
-    saveRDS(rs_mat, file.path(outdir, "snp_betas.rds"))
-    logger$log("start",
-               sprintf("wrote snp_betas.rds (%d x %d)",
-                       nrow(rs_mat), ncol(rs_mat)))
-  }
-  rm(rs_mat); gc(verbose = FALSE)
-
-  qcdf <- if (cfg$savesdf && !is.null(res$sdfs)) {
-    qcmetrics(res$sdfs, platform = platform, logger = logger)
-  } else {
-    qcstream(ss$Basename, platform, logger = logger)
-  }
-  if (!is.null(res$sdfs)) { res$sdfs <- NULL; gc(verbose = FALSE) }
-
-  sample_sheet <- dplyr::left_join(ss, qcdf, by = "sample_id")
-  checkmeta(sample_sheet, qcdf, logger = logger)
-  utils::write.csv(sample_sheet,
-                   file.path(outdir, "sample_sheet.csv"),
-                   row.names = FALSE)
-
-  logger$log("done", "Stage 1 complete.")
-  invisible(list(betas        = res$betas,
-                 mvals        = res$mvals,
-                 mask         = res$mask,
-                 detP         = res$detP,
-                 sample_sheet = sample_sheet,
-                 platform     = platform))
+#' @examples
+#' \dontrun{
+#' pipeline("~/idats", "~/qcout")
+#' pipeline("~/idats", "~/qcout", workers = 4)
+#' }
+pipeline <- function(indir, outdir, ..., quiet = FALSE) {
+  qc(indir = indir, outdir = outdir, ...)
+  if (!isTRUE(quiet)) cat(.run_summary(outdir), sep = "\n")
+  invisible(outdir)
 }
 
-#' Stage 2 per cell type: flagging, QC report, EpiDISH, sample sheet
+#' Run the methylQC pipeline
 #'
-#' Produces QC plots, optional EpiDISH cell-type proportions, and a
-#' consolidated sample sheet. Performs NO automatic sample or probe
-#' exclusion: only flag columns are written. The user applies exclusion
-#' criteria downstream via \code{\link{cleanmat}}.
+#' Stage 1 reads and preprocesses every IDAT pair; Stage 2 derives quality
+#' metrics, calls sex, estimates cell composition and epigenetic age, and
+#' writes the QC report.
 #'
-#' @param celltype Cell-type label for this slice.
-#' @param betas Beta matrix (probes x samples) for this slice.
-#' @param mvals M-value matrix for this slice (currently unused inside
-#'   prepcell; retained because callers commonly hold both matrices).
-#' @param ss Sample sheet for this slice (already merged with QC metrics).
-#' @param platform Platform string.
-#' @param outdir Output directory for this slice.
-#' @param mask Optional logical mask matrix (probes x samples).
-#' @param detP Optional detection p-value matrix.
-#' @param ... Option overrides forwarded to \code{\link{mqcset}}.
-#' @return Invisibly, the number of samples in the slice.
+#' When \code{workers}, \code{batch} and \code{savesdf} are not supplied they
+#' are inherited from \code{\link{qcplan}}, which measures actual memory use on
+#' this machine.
+#'
+#' @param indir directory containing IDAT files.
+#' @param outdir destination directory; created if absent.
+#' @param platform platform string; inferred when \code{NULL}.
+#' @param sheet optional explicit sample sheet path.
+#' @param workers forked worker processes; \code{NULL} inherits from the plan.
+#' @param batch samples per task; \code{NULL} inherits from the plan.
+#' @param extreme extreme memory conservation mode.
+#' @param savesdf retain preprocessed SigDF objects. The preflight withdraws
+#'   this when the cohort is too large to hold them; nothing else depends on
+#'   them, so the run is unaffected.
+#' @param collapse resolve EPICv2 replicate probes; \code{NA} decides
+#'   automatically from the probe identifiers.
+#' @param stage2 also run Stage 2.
+#' @param plan an existing plan from \code{\link{qcplan}}, to avoid measuring
+#'   twice.
+#' @return the output directory, invisibly.
 #' @export
-prepcell <- function(celltype, betas, mvals, ss, platform, outdir,
-                     mask = NULL, detP = NULL, dish = TRUE, ...) {
-  old_opts <- mqcset(...)
-  if (length(old_opts) > 0) on.exit(do.call(options, old_opts), add = TRUE)
+#' @examples
+#' \dontrun{
+#' qcplan("~/idats")
+#' qc("~/idats", "~/qcout")
+#' }
+qc <- function(indir, outdir, platform = NULL, sheet = NULL,
+               workers = NULL, batch = NULL, extreme = NULL, savesdf = NULL,
+               collapse = NULL, stage2 = TRUE, plan = NULL) {
+
   cfg <- mqcopts()
-  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  extreme <- .opt(extreme, "extreme", cfg)
 
-  logger <- makelog(outdir)
-  logger$log("start",
-             sprintf("=== prep for cell type: %s (n=%d) ===",
-                     celltype, ncol(betas)))
-  n_total <- ncol(betas)
+  mqcmakedirs(outdir, batches = isTRUE(extreme))
+  lg <- makelog(mqcpath(outdir, "log", create = TRUE))
+  on.exit(lg$close(), add = TRUE)
 
-  # --- Flag samples (plot colouring only; no CSV, no exclusion) ---
-  flags <- qcflags(ss, logger = logger)
-  if (nrow(flags) / n_total > 0.25) {
-    logger$log("qcflags",
-               sprintf("WARNING: %.0f%% flagged (low detection/intensity)",
-                       100 * nrow(flags) / n_total))
+  lg$log("qc", sprintf("methylQC %s starting",
+                       utils::packageVersion("methylQC")))
+  checkdeps(stop_on_missing = TRUE)
+
+  ## ---- discovery ---------------------------------------------------------
+  ss <- discover(indir, sheet = sheet, logger = lg)
+  seen <- unique(stats::na.omit(ss$detected_platform))
+  if (length(seen) > 1L)
+    stop("this batch mixes array platforms (", paste(seen, collapse = ", "),
+         "); process each platform separately.", call. = FALSE)
+  platform <- platform %||% seen[1] %||% NA_character_
+  if (is.na(platform))
+    stop("could not determine the array platform; pass platform= explicitly",
+         call. = FALSE)
+  lg$log("qc", sprintf("platform: %s", platform))
+
+  cols <- checkmeta(ss, logger = lg)
+
+  ## ---- plan --------------------------------------------------------------
+  ## Always run the preflight, even when workers and batch are given, because
+  ## it is what decides whether SigDFs can be retained and what the memory
+  ## guard's parent budget is.
+  if (is.null(plan)) {
+    plan <- tryCatch(qcplan(ss = ss, platform = platform, extreme = extreme,
+                            savesdf = savesdf, outdir = outdir, verbose = FALSE),
+                     error = function(e) {
+                       lg$log("qc", paste("preflight failed:", conditionMessage(e)),
+                              warn = TRUE)
+                       NULL
+                     })
+    if (!is.null(plan)) for (l in plan$text) lg$log("plan", l)
   }
-  n_low_det   <- sum(grepl("low_detection", flags$reason))
-  n_low_int   <- sum(grepl("low_intensity", flags$reason))
-  low_int_ids <- flags$sample_id[grepl("low_intensity", flags$reason)]
+  workers <- workers %||% plan$workers %||% 1L
+  batch   <- batch   %||% plan$batch   %||% 25L
+  savesdf <- plan$savesdf %||% .opt(savesdf, "savesdf", cfg)
+  parentcap <- (plan$parentcap %|NA|% NULL) %||% .default_memcap(cfg)
+  if (isTRUE(plan$savesdf_downgraded))
+    for (l in plan$sdf_note) lg$log("memory", sub("^\\s+", "", l), warn = FALSE)
+  if (!is.null(plan) && !isTRUE(plan$fits))
+    lg$log("qc", paste("the preflight projects that this run will not fit in",
+                       "memory; consider extreme = TRUE"), warn = TRUE)
 
-  # --- Masked beta matrix for the scree/PCA panels ---
-  # Apply quality mask + detection p-value mask, restrict to cg/ch probes.
-  # No imputation (PCA panel handles complete.cases internally).
-  betasok <- cleanmat(betas, mask = mask, detP = detP,
-                       pthresh = cfg$detp,
-                       probes = c("cg", "ch"),
-                       platform = platform,
-                       impute = FALSE)
+  ## ---- Stage 1 -----------------------------------------------------------
+  t0 <- Sys.time()
+  s1 <- runsesame(ss, platform, outdir, workers = workers, batch = batch,
+                  extreme = extreme, savesdf = savesdf, memcap = parentcap,
+                  logger = lg)
 
-  # --- QC diagnostic report PDF ---
-  qc_flags <- qcreport(ss       = ss,
-                       betas    = betas,
-                       betasok  = betasok,
-                       flagged  = flags,
-                       mask     = mask,
-                       detP     = detP,
-                       platform = platform,
-                       pdf      = file.path(outdir, "qc_plots.pdf"),
-                       pccsv    = file.path(outdir, "pc_scores.csv"),
-                       tailcsv  = file.path(outdir, "failed_probes.csv"),
-                       logger   = logger)
-  rm(betasok); gc(verbose = FALSE)
-  n_sex_mm  <- length(qc_flags$sex_mismatch_ids)
-  n_sex_unc <- length(qc_flags$sex_unclear_ids)
-  n_age_out <- length(qc_flags$age_outlier_ids)
+  n_pre <- length(s1$probe_ids)
+  collapsed <- FALSE
+  do_collapse <- .decide_collapse(collapse, cfg, s1$probe_ids, lg)
+  if (isTRUE(do_collapse) && isTRUE(extreme)) {
+    lg$log("qc", paste("EPICv2 replicate collapsing needs a full matrix and is",
+                       "skipped under extreme = TRUE. Run makemat() then",
+                       "prep(collapse = TRUE)."), warn = TRUE)
+  } else if (isTRUE(do_collapse)) {
+    cv <- collapsev2(s1$betas, s1$detp, s1$design,
+                     method = cfg$collapsemethod, logger = lg)
+    s1$betas <- cv$betas; s1$detp <- cv$detp; s1$design <- cv$design
+    s1$probe_ids <- rownames(cv$betas)
+    ## Both derived summaries are rebuilt. 3.0.0 rebuilt pfail but not phist,
+    ## so prep() (which reads the collapsed matrix) and qcplots() (which reads
+    ## the cached pre-collapse histogram) reported different call rates for the
+    ## same samples, and qcplots() rewrote the sheet with the second one.
+    s1$pfail <- .pfail_from_detp(s1$detp, s1$pgrid)
+    s1$phist <- .phist_from_detp(s1$detp)
+    collapsed <- TRUE
+    attr(s1, "collapsemethod") <- cv$method
+  }
 
-  # --- EpiDISH on raw (unmasked) betas ---
-  # Skipped if dish = FALSE. There is no tissue allowlist: rundish()
-  # decides on its own (it errors if the reference's CpGs don't
-  # overlap the matrix). Caller controls which cell types to run.
-  cell_props <- NULL
-  if (!isTRUE(dish)) {
-    logger$log("rundish",
-               sprintf("skipping EpiDISH (dish = FALSE) for '%s'", celltype))
-  } else {
-    cell_props <- tryCatch(
-      rundish(betas, platform = platform, logger = logger),
-      error = function(e) {
-        logger$log("rundish",
-                   sprintf("EpiDISH skipped for '%s': %s",
-                           celltype, conditionMessage(e)))
-        NULL
-      })
-    if (!is.null(cell_props)) {
-      utils::write.csv(data.frame(sample_id = colnames(betas), cell_props,
-                                  check.names = FALSE),
-                       file.path(outdir, "cell_proportions.csv"),
-                       row.names = FALSE)
+  ## ---- persist Stage 1 ---------------------------------------------------
+  prov <- list(methylqc_version = as.character(utils::packageVersion("methylQC")),
+               sesame_version = as.character(utils::packageVersion("sesame")),
+               platform = platform, prep = "C|D+ELBAR|B",
+               created = as.character(Sys.time()))
+  if (!is.null(s1$betas)) {
+    attr(s1$betas, "methylqc") <- prov
+    save_rds_atomic(s1$betas, mqcpath(outdir, "betas", create = TRUE))
+    save_rds_atomic(s1$detp, mqcpath(outdir, "detp"))
+    snp <- snpbetas(s1$betas)
+    if (!is.null(snp)) save_rds_atomic(snp, mqcpath(outdir, "snpbetas"))
+  }
+  save_rds_atomic(s1$design, mqcpath(outdir, "designmask", create = TRUE))
+  if (isTRUE(savesdf) && !is.null(s1$sdfs))
+    save_rds_atomic(s1$sdfs, mqcpath(outdir, "sdfs"))
+  write_csv_atomic(s1$failed, mqcpath(outdir, "failedsample", create = TRUE))
+
+  ## ---- Stage 1 sample sheet ---------------------------------------------
+  ss <- .assign_cols(ss, s1$stats, "sample_id")
+  write_csv_atomic(ss, mqcpath(outdir, "sheet", create = TRUE))
+  lg$log("qc", sprintf("Stage 1 written to %s", mqcpath(outdir, "matrices")))
+
+  info <- list(
+    pkg_version = prov$methylqc_version, sesame_version = prov$sesame_version,
+    date = as.character(Sys.Date()), platform = platform, indir = indir,
+    n_samples = nrow(ss), n_batches = length(unique(ss$batch_folder)),
+    n_probes = length(s1$probe_ids), n_probes_precollapse = n_pre,
+    n_failed = nrow(s1$failed), n_design_masked = sum(s1$design),
+    collapsed = collapsed,
+    collapsemethod = attr(s1, "collapsemethod") %||% cfg$collapsemethod,
+    maskuse = cfg$maskuse, detp = cfg$detp, samplemin = cfg$samplemin,
+    intmad = cfg$intmad, intfloor = cfg$intfloor,
+    workers = workers, batch = batch, extreme = isTRUE(extreme),
+    savesdf = isTRUE(savesdf), savesdf_downgraded = isTRUE(plan$savesdf_downgraded),
+    stage1_time = fmtdur(as.numeric(difftime(Sys.time(), t0, units = "secs"))),
+    dishref = cfg$dishref, dishmethod = cfg$dishmethod)
+  save_rds_atomic(info, mqcpath(outdir, "runinfo", create = TRUE))
+
+  if (!isTRUE(stage2)) {
+    writemethods(outdir, info)
+    lg$log("qc", "Stage 2 skipped by request")
+    return(invisible(outdir))
+  }
+
+  if (isTRUE(extreme)) {
+    lg$log("qc", paste("extreme mode: Stage 2 needs a full matrix.",
+                       "Run makemat() then prep()."), warn = TRUE)
+    writemethods(outdir, info)
+    return(invisible(outdir))
+  }
+
+  prep(outdir, s1 = s1, cols = cols, info = info, logger = lg)
+  invisible(outdir)
+}
+
+
+#' Stage 2: metrics, flags, sex, cell composition, age and the QC report
+#'
+#' @param dir an output directory produced by \code{\link{qc}}.
+#' @param s1 in-memory Stage 1 results; read from disk when \code{NULL}.
+#' @param cols resolved metadata column names.
+#' @param info run facts for METHODS.txt; read from \code{run_info.rds} when
+#'   \code{NULL}.
+#' @param collapse collapse EPICv2 replicates before Stage 2; \code{NA}
+#'   decides automatically. Use this after \code{makemat()} on an
+#'   \code{extreme = TRUE} run.
+#' @param logger optional logger.
+#' @return \code{dir}, invisibly.
+#' @export
+#' @examples
+#' \dontrun{
+#' prep("~/qcout")
+#' }
+prep <- function(dir, s1 = NULL, cols = NULL, info = NULL, collapse = NULL,
+                 logger = NULL) {
+
+  own <- is.null(logger)
+  lg <- logger %||% makelog(mqcpath(dir, "log", create = TRUE))
+  if (own) on.exit(lg$close(), add = TRUE)
+  cfg <- mqcopts()
+
+  if (is.null(s1)) {
+    mqccheckdir(dir)
+    s1 <- .load_stage1(dir, lg)
+    ## An extreme-mode run reaches Stage 2 through makemat(), so the matrix on
+    ## disk may still carry EPICv2 replicate suffixes.
+    if (isTRUE(.decide_collapse(collapse, cfg, s1$probe_ids, lg))) {
+      cv <- collapsev2(s1$betas, s1$detp, s1$design,
+                       method = cfg$collapsemethod, logger = lg)
+      s1$betas <- cv$betas; s1$detp <- cv$detp; s1$design <- cv$design
+      s1$probe_ids <- rownames(cv$betas)
+      s1$phist <- NULL; s1$pfail <- NULL      # rebuilt by build_cache()
+      save_rds_atomic(s1$betas, mqcpath(dir, "betas"))
+      save_rds_atomic(s1$detp, mqcpath(dir, "detp"))
+      save_rds_atomic(s1$design, mqcpath(dir, "designmask"))
     }
   }
+  info <- info %||% .load_runinfo(dir, lg)
 
-  # --- Consolidated sample sheet ---
-  sample_sheet <- build_consolidated_sample_sheet(ss, flags, qc_flags,
-                                                  cell_props, cfg)
-  utils::write.csv(sample_sheet, file.path(outdir, "sample_sheet.csv"),
-                   row.names = FALSE)
+  ss <- utils::read.csv(mqcpath(dir, "sheet"), stringsAsFactors = FALSE,
+                        check.names = FALSE)
+  cols <- cols %||% checkmeta(ss, logger = lg)
+  platform <- unique(stats::na.omit(ss$detected_platform))[1] %||% NA_character_
 
-  # --- QC summary printed to console ---
-  message(""); message("============ QC SUMMARY ============")
-  message(sprintf("Total samples:                  %d", n_total))
-  message("--- Sample flagging (call rate + intensity) ---")
-  message(sprintf("  Low detection fraction:       %d / %d (%.1f%%)",
-                  n_low_det, n_total, 100 * n_low_det / n_total))
-  message(sprintf("  Low mean intensity:           %d / %d (%.1f%%)",
-                  n_low_int, n_total, 100 * n_low_int / n_total))
-  if (n_low_int > 0)
-    message(sprintf("    IDs: %s", paste(low_int_ids, collapse = ", ")))
-  message("--- Sex check ---")
-  message(sprintf("  Mismatches:                   %d", n_sex_mm))
-  if (n_sex_mm > 0)
-    message(sprintf("    IDs: %s",
-                    paste(qc_flags$sex_mismatch_ids, collapse = ", ")))
-  message(sprintf("  Predicted sex unclear:        %d", n_sex_unc))
-  if (n_sex_unc > 0)
-    message(sprintf("    IDs: %s",
-                    paste(qc_flags$sex_unclear_ids, collapse = ", ")))
-  message("--- Age check (reported vs Horvath) ---")
-  message(sprintf("  Age outliers (>3 SD):         %d", n_age_out))
-  if (n_age_out > 0)
-    message(sprintf("    IDs: %s",
-                    paste(qc_flags$age_outlier_ids, collapse = ", ")))
+  ## ---- per-sample metrics ------------------------------------------------
+  qcm <- qcmetrics(s1$stats, detp = s1$detp, pthresh = cfg$detp,
+                   samplemin = cfg$samplemin, intmad = cfg$intmad,
+                   intfloor = cfg$intfloor, logger = lg)
 
-  # --- Probe breakdown computed inline (no CSV) ---
-  probe_ids  <- rownames(betas)
-  is_cg      <- grepl("^cg", probe_ids)
-  is_ch      <- grepl("^ch", probe_ids)
-  is_rs      <- grepl("^rs", probe_ids)
-  is_other   <- !is_cg & !is_ch & !is_rs
-  sex_pids   <- sexprobes(platform)
-  is_sex     <- probe_ids %in% sex_pids
-  is_cg_auto <- is_cg & !is_sex
-  is_cg_sex  <- is_cg & is_sex
+  ## Attach the metadata columns BEFORE flagging. qcm is derived from the
+  ## Stage 1 diagnostics and carries no sample sheet columns, so calling
+  ## flagsamples() first would leave reported sex and age as NA and make
+  ## sex_mismatch silently always FALSE.
+  qcm <- .carry_meta(qcm, ss, cols)
+  flags <- flagsamples(qcm, sexcol = cols$sex, agecol = cols$age, logger = lg)
 
-  det_mask  <- if (!is.null(detP))
-                 detP > cfg$detp
-               else
-                 matrix(FALSE, nrow = nrow(betas), ncol = ncol(betas))
-  qual_mask <- if (!is.null(mask))
-                 mask & !det_mask
-               else
-                 matrix(FALSE, nrow = nrow(betas), ncol = ncol(betas))
-  combined_mask <- det_mask | qual_mask
+  ## ---- epigenetic age (no masking) ---------------------------------------
+  ages <- predictages(s1$betas, logger = lg)
+  if (!is.null(ages)) flags <- .assign_cols(flags, ages, "sample_id")
 
-  probe_pass_rate <- 1 - rowMeans(combined_mask)
-  probe_passes    <- probe_pass_rate >= cfg$probemin
+  ## ---- cell composition ---------------------------------------------------
+  props <- rundish(s1$betas, logger = lg)
+  if (!is.null(props)) flags <- .assign_cols(flags, props, "sample_id")
 
-  n_total_probes <- nrow(betas)
-  n_rs    <- sum(is_rs)
-  n_other <- sum(is_other)
+  ## ---- frozen panels -----------------------------------------------------
+  sexp <- if (!is.na(platform)) sexprobes(platform, lg) else character(0)
+  ## The matrix may have been collapsed to bare identifiers while sexprobes()
+  ## returns whatever the manifest carries, so align the two before use.
+  if (length(sexp) && !is.null(s1$probe_ids) && !has_v2_suffix(s1$probe_ids))
+    sexp <- unique(stripv2(sexp))
+  bt <- pcainput(s1$betas, s1$detp, s1$design, sexp, lg)
+  pca <- runpca(bt, lg)
+  mds <- runmds(bt, lg)
+  dens <- betadensity(s1$betas)
+  rm(bt); gc(verbose = FALSE)
 
-  fmt <- function(pass, total) sprintf("%s / %s (%.1f%%)",
-    format(pass, big.mark = ","), format(total, big.mark = ","),
-    if (total > 0) 100 * pass / total else 0)
+  ## ---- cache -------------------------------------------------------------
+  cc <- build_cache(s1, platform, pca = pca, mds = mds, density = dens)
+  cc$design <- s1$design
+  save_rds_atomic(cc, mqcpath(dir, "cache", create = TRUE))
 
-  message("--- Probe breakdown ---")
-  message(sprintf("  Total probes on array:        %s",
-                  format(n_total_probes, big.mark = ",")))
-  message(sprintf("    Autosomal CpG (cg):         %s",
-                  fmt(sum(is_cg_auto & probe_passes), sum(is_cg_auto))))
-  message(sprintf("    Non-CpG (ch):               %s",
-                  fmt(sum(is_ch & probe_passes), sum(is_ch))))
-  message(sprintf("    Sex chromosome (cg):        %s",
-                  fmt(sum(is_cg_sex & probe_passes), sum(is_cg_sex))))
-  message(sprintf("    SNP (rs):                   %d", n_rs))
-  message(sprintf("    Other non-cg/ch:            %d", n_other))
+  ## ---- SNP identity ------------------------------------------------------
+  snp <- snpbetas(s1$betas)
+  donors <- if (!is.na(cols$donor) && cols$donor %in% names(ss))
+    stats::setNames(as.character(ss[[cols$donor]]), ss$sample_id) else NULL
+  sc <- snpcheck(snp, donors = donors, logger = lg)
+  if (!is.null(sc))
+    write_csv_atomic(sc, mqcpath(dir, "snpconc", create = TRUE))
 
-  n_cells  <- length(combined_mask)
-  n_det    <- sum(det_mask)
-  n_qual   <- sum(qual_mask)
-  pct_det  <- 100 * n_det  / n_cells
-  pct_qual <- 100 * n_qual / n_cells
-  message(sprintf("  Masking (detection p > %.2f): %.2f%% of probe-sample values",
-                  cfg$detp, pct_det))
-  message(sprintf("  Masking (quality/design):     %.2f%% of probe-sample values",
-                  pct_qual))
-  message("====================================")
-  message("")
+  ## ---- report ------------------------------------------------------------
+  pf <- probefail(s1$detp, cfg$detp)
+  qcreport(flags, cc, pf, mqcpath(dir, "plots", create = TRUE),
+           mqcpath(dir, "failedprobe", create = TRUE),
+           mqcpath(dir, "pcscores"), cfg = cfg, logger = lg)
 
-  summary_line <- sprintf(
-    "[%s] summary :: total=%d low_det=%d low_int=%d sex_mm=%d sex_unc=%d age_out=%d",
-    format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-    n_total, n_low_det, n_low_int, n_sex_mm, n_sex_unc, n_age_out)
-  cat(summary_line, "\n", file = logger$path, append = TRUE)
+  ## ---- single sample sheet, updated in place -----------------------------
+  ss <- .assign_cols(ss, flags, "sample_id")
+  write_csv_atomic(ss, mqcpath(dir, "sheet"))
 
-  rm(sample_sheet, combined_mask, det_mask, qual_mask); gc(verbose = FALSE)
-  done_line <- sprintf("[%s] done :: prep for %s complete.",
-                       format(Sys.time(), "%Y-%m-%d %H:%M:%S"), celltype)
-  cat(done_line, "\n", file = logger$path, append = TRUE)
-  invisible(n_total)
+  info <- .extend_info(info, ss, flags, pca, props, ages, cfg, platform)
+  save_rds_atomic(info, mqcpath(dir, "runinfo", create = TRUE))
+  writemethods(dir, info)
+  lg$log("prep", "Stage 2 complete")
+  invisible(dir)
 }
 
-#' Build consolidated sample sheet
-#' @keywords internal
-#' @noRd
-build_consolidated_sample_sheet <- function(ss, flags, qc_flags,
-                                            cell_props, cfg) {
-  out <- ss
-  out$flagged <- out$sample_id %in% flags$sample_id
-  m_excl <- match(out$sample_id, flags$sample_id)
-  out$flag_reason <- ifelse(is.na(m_excl), "", flags$reason[m_excl])
 
-  sex_col <- resolve_column(colnames(out), cfg$sexcol, cfg$sexaliases)
-  if (!is.na(sex_col))
-    out$reported_sex_normalized <- normalize_sex(out[[sex_col]],
-                                                 col_name = sex_col)
-  if (!is.null(qc_flags$sex_detail) && nrow(qc_flags$sex_detail) > 0) {
-    m_sex <- match(out$sample_id, qc_flags$sex_detail$sample_id)
-    out$inferred_sex_intensity <-
-      qc_flags$sex_detail$inferred_sex_intensity[m_sex]
+#' Regenerate the threshold-dependent QC panels
+#'
+#' Recomputes only what a threshold change actually invalidates. PCA, MDS and
+#' the beta density panels are frozen, so they never need recomputing; the
+#' cached per-sample p-value histogram serves call rates at any threshold it
+#' can resolve, and the cached per-probe grid counts serve probe failure rates
+#' at any threshold on the grid. Only an off-grid detection threshold requires
+#' re-reading the detection matrix.
+#'
+#' Without \code{suffix} the sample sheet is updated to match, so the report
+#' and the sheet never disagree about how many samples failed. With
+#' \code{suffix} nothing canonical is touched, so a side-by-side comparison
+#' does not disturb the primary result.
+#'
+#' @param dir output directory.
+#' @param detp,samplemin,failmin,intmad,intfloor,inclqual thresholds to change;
+#'   \code{NULL} keeps the cached value.
+#' @param suffix write \code{qc_plots_<suffix>.pdf} and matching sidecar files
+#'   instead of overwriting the canonical ones.
+#' @param dry print the plan and return without doing the work.
+#' @return the PDF path, invisibly.
+#' @export
+#' @examples
+#' \dontrun{
+#' qcplots("~/qcout", detp = 0.01, dry = TRUE)
+#' qcplots("~/qcout", detp = 0.01, suffix = "detp01")
+#' }
+qcplots <- function(dir, detp = NULL, samplemin = NULL, failmin = NULL,
+                    intmad = NULL, intfloor = NULL, inclqual = NULL,
+                    suffix = NULL, dry = FALSE) {
+
+  mqccheckdir(dir)
+  lg <- makelog(mqcpath(dir, "log", create = TRUE))
+  on.exit(lg$close(), add = TRUE)
+
+  cc <- loadcache(dir, lg)
+  cfg <- mqcopts()
+  new <- list(detp = detp, samplemin = samplemin, failmin = failmin,
+              intmad = intmad, intfloor = intfloor, inclqual = inclqual)
+  new <- new[!vapply(new, is.null, logical(1))]
+  for (k in names(new)) cfg[[k]] <- new[[k]]
+
+  pl <- plan_replot(cc, cfg$detp)
+  msg <- c(sprintf("qcplots plan - %s", dir),
+           if (length(new))
+             sprintf("  changed: %s",
+                     paste(sprintf("%s -> %s", names(new), unlist(new)),
+                           collapse = ", "))
+           else "  changed: nothing",
+           sprintf("  %s", pl$note),
+           "  frozen  : PCA, MDS, beta density",
+           sprintf("  recompute: %s",
+                   if (pl$needs_matrix) "detection matrix scan" else "nothing (cache only)"))
+  for (m in msg) lg$log("qcplots", m)
+  if (isTRUE(dry)) return(invisible(NULL))
+
+  if (is.null(cc))
+    stop("no usable QC cache in ", dir, "; run prep() first.", call. = FALSE)
+
+  ## ---- per-sample metrics -------------------------------------------------
+  ss <- utils::read.csv(mqcpath(dir, "sheet"), stringsAsFactors = FALSE,
+                        check.names = FALSE)
+  cols <- checkmeta(ss, logger = lg)
+
+  ## The cached histogram cannot resolve a threshold finer than one bin, so
+  ## fall back to the matrix rather than reporting a call rate of zero.
+  cr_ok <- !is.null(callrate_from_hist(cc$phist, cfg$detp))
+  dp <- NULL
+  if (!cr_ok) {
+    lg$log("qcplots", sprintf(
+      "detp %g is finer than the cached histogram resolution; reading the detection matrix",
+      cfg$detp))
+    dp <- readRDS(mqcpath(dir, "detp"))
+  }
+  qcm <- qcmetrics(cc$stats, detp = dp, phist = if (cr_ok) cc$phist else NULL,
+                   pthresh = cfg$detp, samplemin = cfg$samplemin,
+                   intmad = cfg$intmad, intfloor = cfg$intfloor, logger = lg)
+  qcm <- .carry_meta(qcm, ss, cols)
+  flags <- flagsamples(qcm, sexcol = cols$sex, agecol = cols$age, logger = lg)
+  keep <- setdiff(names(ss), names(flags))
+  for (k in keep) flags[[k]] <- ss[[k]][match(flags$sample_id, ss$sample_id)]
+
+  ## ---- per-probe failure rate --------------------------------------------
+  pf <- probefail_from_grid(cc$pfail, cc$n_samples, cfg$detp, cc$pgrid)
+  if (is.null(pf)) {
+    lg$log("qcplots", "reading the detection matrix for an off-grid threshold")
+    dp <- dp %||% readRDS(mqcpath(dir, "detp"))
+    pf <- probefail(dp, cfg$detp)
+  }
+  rm(dp); gc(verbose = FALSE)
+
+  ## ---- destinations -------------------------------------------------------
+  ## With a suffix, EVERY artefact is suffixed. 3.0.0 wrote a separate PDF but
+  ## still clobbered failed_probes.csv and sample_sheet.csv, so the canonical
+  ## report and its sidecar files described different thresholds.
+  tag <- function(path, ext) if (is.null(suffix)) path else
+    sub(paste0("\\", ext, "$"), paste0("_", suffix, ext), path)
+  out <- if (is.null(suffix)) mqcpath(dir, "plots", create = TRUE) else
+    file.path(mqcpath(dir, "qc", create = TRUE),
+              sprintf("qc_plots_%s.pdf", suffix))
+
+  qcreport(flags, cc, pf, out,
+           tag(mqcpath(dir, "failedprobe", create = TRUE), ".csv"),
+           tag(mqcpath(dir, "pcscores"), ".csv"), cfg = cfg, logger = lg)
+
+  if (is.null(suffix)) {
+    ss <- .assign_cols(ss, flags, "sample_id")
+    write_csv_atomic(ss, mqcpath(dir, "sheet"))
+    lg$log("qcplots", "sample sheet updated to match the new thresholds")
   } else {
-    out$inferred_sex_intensity <- NA_character_
+    lg$log("qcplots", sprintf(
+      "suffixed run: %s written; the canonical report and sample sheet are untouched",
+      basename(out)))
   }
-  out$sex_mismatch <- out$sample_id %in% qc_flags$sex_mismatch_ids
-  out$sex_unclear  <- out$sample_id %in% qc_flags$sex_unclear_ids
-  out$age_outlier  <- out$sample_id %in% qc_flags$age_outlier_ids
+  invisible(out)
+}
 
-  age_col <- resolve_column(colnames(out), cfg$agecol, cfg$agealiases)
-  if (!is.na(age_col))
-    out$reported_age_parsed <- parse_age_robust(out[[age_col]])
 
-  if (!is.null(cell_props)) {
-    props_df <- data.frame(sample_id = rownames(cell_props), cell_props,
-                           stringsAsFactors = FALSE, check.names = FALSE)
-    out <- dplyr::left_join(out, props_df, by = "sample_id")
+#' Reassemble per-batch matrices written under extreme memory mode
+#'
+#' @param dir output directory.
+#' @param what \code{"betas"} or \code{"detp"}.
+#' @param write also write the assembled matrix to \code{data/matrices/}.
+#' @return the assembled matrix.
+#' @export
+#' @examples
+#' \dontrun{
+#' b <- makemat("~/qcout", "betas", write = TRUE)
+#' }
+makemat <- function(dir, what = c("betas", "detp"), write = FALSE) {
+  what <- match.arg(what)
+  bd <- mqcpath(dir, "batches")
+  if (!dir.exists(bd)) stop("no batch directory at ", bd, call. = FALSE)
+  pat <- if (identical(what, "betas")) "^betas_[0-9]+\\.rds$" else "^detP_[0-9]+\\.rds$"
+  files <- sort(list.files(bd, pattern = pat, full.names = TRUE))
+  if (!length(files)) stop("no ", what, " batch files in ", bd, call. = FALSE)
+
+  ## Only accept batch files belonging to the CURRENT Stage 1. A shorter re-run
+  ## into the same directory leaves higher-numbered files from the previous
+  ## one, and 3.0.0 cbind()ed them in, producing a matrix with phantom columns
+  ## from samples that were not in this cohort at all.
+  ids <- .expected_samples(dir)
+  if (!is.null(ids)) {
+    ok <- vapply(files, function(f) {
+      cn <- tryCatch(colnames(readRDS(f)), error = function(e) NULL)
+      !is.null(cn) && all(cn %in% ids)
+    }, logical(1))
+    if (any(!ok)) {
+      warning(sum(!ok), " batch file(s) in ", bd, " contain samples that are ",
+              "not in this run's sample sheet and were ignored as stale: ",
+              paste(basename(files[!ok]), collapse = ", "), call. = FALSE)
+      files <- files[ok]
+    }
+    if (!length(files))
+      stop("every batch file in ", bd, " is stale; re-run qc().", call. = FALSE)
   }
+
+  first <- readRDS(files[1])
+  rid <- rownames(first)
+  parts <- vector("list", length(files))
+  parts[[1]] <- first
+  for (k in seq_along(files)[-1]) {
+    m <- readRDS(files[k])
+    if (!identical(rownames(m), rid)) m <- m[match(rid, rownames(m)), , drop = FALSE]
+    parts[[k]] <- m
+  }
+  out <- do.call(cbind, parts)
+  rownames(out) <- rid
+  if (anyDuplicated(colnames(out)))
+    stop("duplicate sample columns after reassembly; the batch directory ",
+         "mixes runs. Clear ", bd, " and re-run qc().", call. = FALSE)
+  if (isTRUE(write))
+    save_rds_atomic(out, mqcpath(dir, if (identical(what, "betas")) "betas" else "detp",
+                                 create = TRUE))
   out
 }
 
-#' Stage 2 wrapper: optionally split by cell type
-#'
-#' @param dir Stage 1 output directory.
-#' @param platform Optional platform; defaults to value in metadata.rds.
-#' @param bycell If TRUE, split processing by detected cell type.
-#' @param dish If TRUE (default), run EpiDISH deconvolution within each
-#'   prepcell() call. There is no built-in tissue allowlist; rundish()
-#'   errors gracefully (and is caught) if the configured reference's
-#'   CpGs don't sufficiently overlap the matrix. Set FALSE to skip
-#'   entirely and call \code{\link{rundish}} on the output directory
-#'   afterwards.
-#' @param ... Option overrides forwarded to \code{\link{mqcset}}.
-#' @export
-prep <- function(dir, platform = NULL, bycell = TRUE, dish = TRUE, ...) {
-  cfg <- mqcopts()
-  metadata <- readRDS(file.path(dir, "metadata.rds"))
-  if (is.null(platform)) platform <- metadata$platform
 
-  ss <- utils::read.csv(file.path(dir, "sample_sheet.csv"),
-                        stringsAsFactors = FALSE)
-  mask_path <- file.path(dir, "mask_all.rds")
-  detP_path <- file.path(dir, "detP_all.rds")
-  mask_all <- if (file.exists(mask_path)) readRDS(mask_path) else NULL
-  detP_all <- if (file.exists(detP_path)) readRDS(detP_path) else NULL
+## ---------------------------------------------------------------------------
+## Internals
+## ---------------------------------------------------------------------------
 
-  cell_col <- resolve_column(colnames(ss), cfg$cellcol, cfg$cellaliases)
-
-  if (!bycell || is.na(cell_col) ||
-      length(unique(stats::na.omit(ss[[cell_col]]))) <= 1) {
-    message("Running single-cohort prep.")
-    betas <- readRDS(file.path(dir, "betas_all.rds"))
-    mvals <- readRDS(file.path(dir, "mvals_all.rds"))
-    ids <- intersect(ss$sample_id, colnames(betas))
-    mask_s <- if (!is.null(mask_all)) mask_all[, ids, drop = FALSE] else NULL
-    detP_s <- if (!is.null(detP_all)) detP_all[, ids, drop = FALSE] else NULL
-    prepcell("all",
-             betas[, ids, drop = FALSE], mvals[, ids, drop = FALSE],
-             ss[match(ids, ss$sample_id), ],
-             platform, dir, mask = mask_s, detP = detP_s, dish = dish, ...)
-    rm(betas, mvals, mask_s, detP_s); gc(verbose = FALSE)
-    return(invisible(NULL))
-  }
-
-  cts <- sort(unique(stats::na.omit(ss[[cell_col]])))
-  message(sprintf("Splitting by '%s': %d cell types", cell_col, length(cts)))
-  message("Loading matrices...")
-  ba <- readRDS(file.path(dir, "betas_all.rds"))
-  ma <- readRDS(file.path(dir, "mvals_all.rds"))
-  gc(verbose = FALSE)
-  message(sprintf("Loaded: %d probes x %d samples", nrow(ba), ncol(ba)))
-
-  sdf <- data.frame(cell_type = character(0),
-                    n_input   = integer(0),
-                    n_final   = integer(0),
-                    status    = character(0),
-                    stringsAsFactors = FALSE)
-
-  for (i in seq_along(cts)) {
-    ct <- cts[i]
-    ids <- intersect(ss$sample_id[!is.na(ss[[cell_col]]) &
-                                  ss[[cell_col]] == ct],
-                     colnames(ba))
-    if (length(ids) < 2) {
-      message(sprintf("[%d/%d] skipping %s", i, length(cts), ct))
-      sdf <- rbind(sdf,
-                   data.frame(cell_type = ct, n_input = length(ids),
-                              n_final = length(ids), status = "skipped",
-                              stringsAsFactors = FALSE))
-      next
-    }
-    message(sprintf("[%d/%d] processing %s (n=%d)...",
-                    i, length(cts), ct, length(ids)))
-    mask_s <- if (!is.null(mask_all)) mask_all[, ids, drop = FALSE] else NULL
-    detP_s <- if (!is.null(detP_all)) detP_all[, ids, drop = FALSE] else NULL
-    nf <- tryCatch(prepcell(ct,
-                            ba[, ids, drop = FALSE], ma[, ids, drop = FALSE],
-                            ss[match(ids, ss$sample_id), ],
-                            platform, file.path(dir, ct),
-                            mask = mask_s, detP = detP_s, dish = dish, ...),
-                   error = function(e) {
-                     message("  ERROR: ", e$message); NA_integer_
-                   })
-    sdf <- rbind(sdf,
-                 data.frame(cell_type = ct, n_input = length(ids),
-                            n_final = if (is.null(nf) || is.na(nf))
-                                       NA_integer_ else as.integer(nf),
-                            status = if (is.null(nf) || is.na(nf))
-                                       "failed" else "done",
-                            stringsAsFactors = FALSE))
-    rm(mask_s, detP_s); gc(verbose = FALSE)
-  }
-
-  rm(ba, ma, mask_all, detP_all); gc(verbose = FALSE)
-  utils::write.csv(sdf, file.path(dir, "cell_type_summary.csv"),
-                   row.names = FALSE)
-  message(sprintf("Wrote cell_type_summary.csv (%d rows)", nrow(sdf)))
-  invisible(sdf)
+## The sample IDs this output directory is supposed to contain.
+.expected_samples <- function(dir) {
+  p <- mqcpath(dir, "sheet")
+  if (!file.exists(p)) return(NULL)
+  ss <- tryCatch(utils::read.csv(p, stringsAsFactors = FALSE),
+                 error = function(e) NULL)
+  if (is.null(ss) || !"sample_id" %in% names(ss)) return(NULL)
+  as.character(ss$sample_id)
 }
 
-#' End-to-end pipeline
-#'
-#' @param indir Input directory (passed to \code{\link{qc}}).
-#' @param outdir Output directory (passed to \code{\link{qc}} and used as
-#'   the Stage 1 directory for \code{\link{prep}}).
-#' @param platform Optional platform string.
-#' @param bycell If TRUE, Stage 2 splits by cell type.
-#' @param dish If TRUE (default), run EpiDISH deconvolution per cell
-#'   type during Stage 2. Set to FALSE to skip; call
-#'   \code{\link{rundish}} on the output directory afterwards.
-#' @param ... Option overrides forwarded to \code{\link{mqcset}}.
-#' @export
-pipeline <- function(indir, outdir, platform = NULL, bycell = TRUE,
-                     dish = TRUE, ...) {
-  message("=== Running end-to-end pipeline ===")
-  qc(indir = indir, outdir = outdir, platform = platform, ...)
-  prep(dir = outdir, platform = platform, bycell = bycell, dish = dish, ...)
+## Copy the resolved metadata columns onto the metrics frame, so that
+## flagsamples() can see reported sex and age.
+.carry_meta <- function(qcm, ss, cols) {
+  want <- stats::na.omit(unlist(cols[c("sex", "age", "batch", "cell", "donor")]))
+  want <- intersect(unique(as.character(want)), names(ss))
+  want <- setdiff(want, names(qcm))
+  if (!length(want)) return(qcm)
+  .assign_cols(qcm, ss[, c("sample_id", want), drop = FALSE], "sample_id")
 }
 
-#' @keywords internal
-#' @noRd
-`%||%` <- function(a, b) if (is.null(a)) b else a
+## A memory cap derived from the system even when no plan was run.
+.default_memcap <- function(cfg) {
+  a <- sysmem()$available
+  if (is.na(a)) NULL else a * cfg$memfrac
+}
+
+## Assign columns from `src` onto `dst`, matched on `key`. Assignment rather
+## than a join, so re-running never produces .x/.y duplicates.
+.assign_cols <- function(dst, src, key) {
+  if (is.null(src) || !nrow(src)) return(dst)
+  if (!key %in% names(dst) || !key %in% names(src))
+    stop("both frames need a '", key, "' column", call. = FALSE)
+  m <- match(dst[[key]], src[[key]])
+  for (cl in setdiff(names(src), key)) dst[[cl]] <- src[[cl]][m]
+  dst
+}
+
+.decide_collapse <- function(collapse, cfg, probe_ids, lg) {
+  want <- if (!is.null(collapse)) collapse else cfg$collapse
+  auto <- has_v2_suffix(probe_ids)
+  if (length(want) != 1L || is.na(want)) {
+    if (auto) lg$log("qc", "EPICv2 replicate suffixes detected; collapsing")
+    return(auto)
+  }
+  if (isTRUE(want) && !auto) {
+    lg$log("qc", "collapse requested but no replicate suffixes are present; skipping")
+    return(FALSE)
+  }
+  if (!isTRUE(want) && auto)
+    lg$log("qc", paste("EPICv2 replicate suffixes are present but collapse is",
+                       "disabled. Clock and cell-type references key on bare",
+                       "cg identifiers and will not match."), warn = TRUE)
+  isTRUE(want)
+}
+
+.load_runinfo <- function(dir, lg) {
+  p <- mqcpath(dir, "runinfo")
+  if (!file.exists(p)) {
+    lg$log("prep", paste("no run_info.rds; METHODS.txt will omit the Stage 1",
+                         "facts. Re-run qc() to regenerate them."), warn = TRUE)
+    return(NULL)
+  }
+  tryCatch(readRDS(p), error = function(e) NULL)
+}
+
+.load_stage1 <- function(dir, lg) {
+  betas <- readRDS(mqcpath(dir, "betas"))
+  detp <- readRDS(mqcpath(dir, "detp"))
+  design <- readRDS(mqcpath(dir, "designmask"))
+  sdfs <- if (file.exists(mqcpath(dir, "sdfs"))) readRDS(mqcpath(dir, "sdfs")) else NULL
+  cc <- loadcache(dir, lg)
+  ss <- utils::read.csv(mqcpath(dir, "sheet"), stringsAsFactors = FALSE,
+                        check.names = FALSE)
+  stats <- cc$stats
+  if (is.null(stats)) {
+    keepc <- intersect(names(ss), c("sample_id", names(stats_raw_template())))
+    stats <- ss[, keepc, drop = FALSE]
+  }
+  detp <- conform_to(detp, betas, "detP matrix")
+  lg$log("prep", sprintf("loaded Stage 1: %d probes x %d samples",
+                         nrow(betas), ncol(betas)))
+  list(betas = betas, detp = detp, design = design, stats = stats,
+       sdfs = sdfs, probe_ids = rownames(betas),
+       phist = cc$phist, pfail = cc$pfail, pgrid = cc$pgrid %||% .MQC_PGRID)
+}
+
+.extend_info <- function(info, ss, flags, pca, props, ages, cfg, platform) {
+  info <- info %||% list()
+  info$platform <- info$platform %||% platform
+  info$n_samples <- nrow(ss)
+  info$n_low_callrate <- sum(flags$low_callrate, na.rm = TRUE)
+  info$n_low_intensity <- sum(flags$low_intensity, na.rm = TRUE)
+  info$n_sex_mismatch <- sum(flags$sex_mismatch, na.rm = TRUE)
+  info$n_sex_unclear <- sum(flags$sex_unclear, na.rm = TRUE)
+  info$sex_called <- any(!is.na(flags$inferred_sex))
+  info$int_cutoff <- sprintf("%.0f", unique(stats::na.omit(flags$intensity_cutoff))[1] %||% NA_real_)
+  info$int_median <- sprintf("%.0f", stats::median(flags$mean_intensity_raw, na.rm = TRUE))
+  info$cohort_low <- isTRUE(stats::median(flags$mean_intensity_raw, na.rm = TRUE) < cfg$intfloor)
+  info$n_pca_probes <- pca$n_probes %||% NA
+  info$cells_ok <- !is.null(props)
+  ## These are counts, not objects. 3.0.0 stored the whole data.frame and then
+  ## interpolated it into sprintf("%s"), which emitted one copy of the
+  ## paragraph per column, and reported the number of cell TYPES under the
+  ## label "reference probes matched the array".
+  info$n_cell_types <- if (is.null(props)) NA else
+    (attr(props, "n_types") %||% (ncol(props) - 1L))
+  info$n_dish_probes <- if (is.null(props)) NA else (attr(props, "n_probes") %||% NA)
+  info$clock_ok <- !is.null(ages)
+  info$clock <- if (is.null(ages)) NA_character_ else "Horvath353"
+  if (!is.null(ages)) {
+    np <- grep("nprobes$", names(ages), value = TRUE)[1]
+    nm <- grep("nmodel$", names(ages), value = TRUE)[1]
+    info$n_clock_present <- if (is.na(np)) NA else max(ages[[np]], na.rm = TRUE)
+    info$n_clock_model <- if (is.na(nm)) NA else ages[[nm]][1]
+  }
+  info$maskuse <- cfg$maskuse; info$detp <- cfg$detp
+  info$samplemin <- cfg$samplemin; info$intmad <- cfg$intmad
+  info$intfloor <- cfg$intfloor
+  info$dishref <- cfg$dishref; info$dishmethod <- cfg$dishmethod
+  info
+}
+
+## The end-of-run summary pipeline() prints.
+.run_summary <- function(dir) {
+  L <- character(0)
+  add <- function(...) L <<- c(L, sprintf(...))
+  info <- tryCatch(readRDS(mqcpath(dir, "runinfo")), error = function(e) NULL)
+  ss <- tryCatch(utils::read.csv(mqcpath(dir, "sheet"), stringsAsFactors = FALSE),
+                 error = function(e) NULL)
+  add("")
+  add("methylQC complete - %s", dir)
+  add("")
+  if (!is.null(info)) {
+    add("  %-26s: %s, %s probes", "Platform", info$platform %||% "?",
+        format(info$n_probes %||% NA, big.mark = ","))
+    add("  %-26s: %s processed, %s failed", "Samples",
+        format(info$n_samples %||% NA, big.mark = ","), info$n_failed %||% 0)
+    add("  %-26s: %s", "Stage 1 time", info$stage1_time %||% "?")
+  }
+  if (!is.null(ss)) {
+    f <- function(k) if (k %in% names(ss)) sum(ss[[k]], na.rm = TRUE) else NA
+    add("  %-26s: %s", "Flagged samples", f("flagged"))
+    add("      low call rate         : %s", f("low_callrate"))
+    add("      low intensity         : %s", f("low_intensity"))
+    add("      sex mismatch          : %s", f("sex_mismatch"))
+    if (isFALSE(info$sex_called))
+      add("      (no sex was called: cohort is not bimodal in chrY intensity)")
+  }
+  add("")
+  add("  Report    : %s", mqcpath(dir, "plots"))
+  add("  Sheet     : %s", mqcpath(dir, "sheet"))
+  add("  Methods   : %s", mqcpath(dir, "methods"))
+  add("  Log       : %s", mqcpath(dir, "log"))
+  add("")
+  add("  Retune a threshold without reprocessing:")
+  add("    qcplots(\"%s\", detp = 0.01)", dir)
+  add("")
+  L
+}

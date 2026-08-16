@@ -2,57 +2,48 @@
 % Please edit documentation in R/exclusions.R
 \name{flagsamples}
 \alias{flagsamples}
-\title{Flag samples by detection call rate}
+\title{Flag samples failing quality thresholds}
 \usage{
 flagsamples(
-  detP,
-  callrate = NULL,
-  pthresh = NULL,
-  csv = "flagged_samples.csv",
+  qc,
+  sexcol = NA_character_,
+  agecol = NA_character_,
+  sexinfo = NULL,
+  agesd = 3,
   logger = NULL
 )
 }
 \arguments{
-\item{detP}{Numeric detection p-value matrix (probes x samples), e.g.
-\code{readRDS("detP_all.rds")}.}
+\item{qc}{per-sample metrics from \code{\link{qcmetrics}}.}
 
-\item{callrate}{Minimum acceptable call rate. Samples below this are
-flagged. Default: the \code{samplemin} option (0.95).}
+\item{sexcol}{resolved reported-sex column name, or \code{NA}.}
 
-\item{pthresh}{Detection p-value cutoff; a probe is counted as detected
-when \code{detP <= pthresh}. Default: the \code{detp} option (0.05).}
+\item{agecol}{resolved age column name, or \code{NA}.}
 
-\item{csv}{Output CSV path. Default \code{"flagged_samples.csv"}.}
+\item{sexinfo}{a \code{\link{sexcall}} result, or \code{NULL} to derive one
+from the \code{sex_chrX_intensity} / \code{sex_chrY_intensity} columns.}
 
-\item{logger}{Optional logger.}
+\item{agesd}{age outlier cutoff, in cohort standard deviations.}
+
+\item{logger}{optional logger.}
 }
 \value{
-Invisibly, a data.frame of ALL samples with columns sample_id,
-call_rate, and flagged (logical). The CSV contains only flagged rows.
+\code{qc} with added flag columns and a \code{flagged} /
+  \code{flag_reason} summary.
 }
 \description{
-A standalone, opt-in utility. Computes each sample's call rate from a
-detection p-value matrix (fraction of probes with \code{detP <= pthresh})
-and writes a CSV of every sample whose call rate falls below
-\code{callrate}.
+Applies the call-rate, intensity, sex-concordance and age-outlier checks
+and returns the sample sheet with flag columns added.
 }
 \details{
-This function performs NO automatic exclusion. It only produces a list.
-To act on it, the user passes the IDs themselves to
-\code{\link{cleanmat}(dropsamples = ...)} — either the returned vector or a
-CSV they assemble. \code{flagsamples()} does not accept hand-picked IDs;
-it flags purely on the call-rate threshold.
+Sex is called by \code{\link{sexcall}} from the sex-chromosome intensities
+measured during Stage 1, not by \pkg{sesame}. When the cohort does not
+support a call -- because it is single-sex, too small, or too noisy --
+\code{inferred_sex} is \code{NA} for every sample and \code{sex_mismatch} is
+\code{FALSE}, rather than a split being invented.
 }
 \examples{
 \dontrun{
-detP <- readRDS("results/detP_all.rds")
-flagged <- flagsamples(detP, callrate = 0.95,
-                       csv = "results/flagged_samples.csv")
-bad_ids <- flagged$sample_id[flagged$flagged]
-
-betas <- readRDS("results/betas_all.rds")
-mask  <- readRDS("results/mask_all.rds")
-betas_clean <- cleanmat(betas, mask = mask, detP = detP,
-                         dropsamples = bad_ids, platform = "EPIC")
+flagged <- flagsamples(qc, sexcol = "Reported_Sex")
 }
 }

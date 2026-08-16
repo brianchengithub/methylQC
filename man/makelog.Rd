@@ -2,16 +2,26 @@
 % Please edit documentation in R/logging.R
 \name{makelog}
 \alias{makelog}
-\title{Create a file + console logger}
+\title{Create a pipeline logger}
 \usage{
-makelog(outdir)
+makelog(path, echo = TRUE)
 }
 \arguments{
-\item{outdir}{Directory where the log file will be written.}
+\item{path}{log file path; the containing directory is created.}
+
+\item{echo}{print each line to the console as well.}
 }
 \value{
-A list with \code{log(step, msg)} function and \code{path}.
+a list with \code{$log()}, \code{$path} and \code{$close()}.
 }
 \description{
-Create a file + console logger
+Returns an object with a \code{$log(stage, message, warn = FALSE)} method
+that appends a timestamped line to the log file and echoes it to the
+console. When \code{warn = TRUE} an R \code{warning()} is also raised, so
+failures are visible in an interactive session rather than only in the file.
+}
+\examples{
+lg <- makelog(file.path(tempdir(), "demo.log"))
+lg$log("demo", "hello")
+lg$close()
 }

@@ -1,6 +1,7 @@
 # R project files
 .Rproj.user/
 .Rhistory
+.Rapp.history
 .RData
 .Ruserdata
 *.Rproj
@@ -9,12 +10,17 @@
 *.o
 *.so
 *.dll
+*.tar.gz
 inst/doc
+..Rcheck/
+*.Rcheck/
 
 # Data files (never commit raw data)
 *.idat
+*.idat.gz
 *.rds
 
-# OS files
+# Tool/editor state
+.claude/
 .DS_Store
 Thumbs.db
