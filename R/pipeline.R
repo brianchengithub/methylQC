@@ -343,7 +343,113 @@ prep <- function(dir, s1 = NULL, cols = NULL, info = NULL, collapse = NULL,
 }
 
 
+#' Find every methylQC output directory beneath a path
+#'
+#' A path that is itself an output directory resolves to itself; otherwise the
+#' tree is searched for \code{qc/qccache.rds}. Directories holding Stage 1
+#' output but no cache are reported, since those need \code{\link{prep}}
+#' rather than \code{\link{qcplots}}.
+#'
+#' @param dir an output directory, or a parent containing several.
+#' @return a character vector of output directories.
+#' @keywords internal
+#' @noRd
+.find_outdirs <- function(dir) {
+  if (!dir.exists(dir)) stop("directory does not exist: ", dir, call. = FALSE)
+  if (file.exists(mqcpath(dir, "cache"))) return(dir)
+
+  hits <- list.files(dir, pattern = "^qccache\\.rds$", recursive = TRUE,
+                     full.names = TRUE)
+  hits <- hits[basename(dirname(hits)) == "qc"]
+  found <- unique(dirname(dirname(hits)))
+
+  if (!length(found)) {
+    ## Distinguish "nothing here" from "processed but Stage 2 never ran", which
+    ## is a different fix.
+    s1 <- list.files(dir, pattern = "^betas_all\\.rds$", recursive = TRUE,
+                     full.names = TRUE)
+    if (length(s1))
+      stop(length(s1), " directory/directories under '", dir, "' hold Stage 1 ",
+           "output but no QC cache. Run prep() on them first; qcplots() only ",
+           "redraws from a cache.", call. = FALSE)
+    stop("no methylQC output found under '", dir, "'. Looked for ",
+         "qc/qccache.rds. Pass the output directory itself, or the parent of ",
+         "several.", call. = FALSE)
+  }
+  sort(found)
+}
+
 #' Regenerate the threshold-dependent QC panels
+#'
+#' Recomputes only what a threshold change actually invalidates. The PCA and
+#' MDS coordinates are frozen, so they never need recomputing; the cached
+#' per-sample p-value histogram serves call rates at any threshold it can
+#' resolve, and the cached per-probe grid counts serve probe failure rates at
+#' any threshold on the grid. Only an off-grid detection threshold requires
+#' re-reading the detection matrix.
+#'
+#' \code{dir} may be a single output directory, or a parent holding many. In
+#' the second case every output directory beneath it is found by its
+#' \code{qc/qccache.rds} and regenerated in turn, so a whole set of projects
+#' can be brought up to date in one call. One directory failing does not stop
+#' the rest; failures are collected and reported at the end.
+#'
+#' Without \code{suffix} the sample sheet is updated to match, so the report
+#' and the sheet never disagree about how many samples failed. With
+#' \code{suffix} nothing canonical is touched.
+#'
+#' @param dir an output directory, or a parent containing several.
+#' @param detp,samplemin,failmin,intmad,intfloor,inclqual thresholds to change;
+#'   \code{NULL} keeps the cached value.
+#' @param suffix write \code{qc_plots_<suffix>.pdf} and matching sidecar files
+#'   instead of overwriting the canonical ones.
+#' @param dry print the plan and return without doing the work.
+#' @return the PDF path(s), invisibly.
+#' @export
+#' @examples
+#' \dontrun{
+#' qcplots("~/qcout")                          # one directory
+#' qcplots("~/projects")                       # every project beneath it
+#' qcplots("~/projects", detp = 0.01)          # ... at a new threshold
+#' qcplots("~/qcout", detp = 0.01, dry = TRUE) # what would this cost?
+#' }
+qcplots <- function(dir, detp = NULL, samplemin = NULL, failmin = NULL,
+                    intmad = NULL, intfloor = NULL, inclqual = NULL,
+                    suffix = NULL, dry = FALSE) {
+
+  dirs <- .find_outdirs(dir)
+  many <- length(dirs) > 1L
+  if (many)
+    message(sprintf("methylQC: %d output directories found under %s",
+                    length(dirs), dir))
+
+  out <- character(0); failed <- character(0)
+  for (k in seq_along(dirs)) {
+    d <- dirs[k]
+    if (many) message(sprintf("  [%d/%d] %s", k, length(dirs), d))
+    r <- tryCatch(
+      .qcplots_one(d, detp = detp, samplemin = samplemin, failmin = failmin,
+                   intmad = intmad, intfloor = intfloor, inclqual = inclqual,
+                   suffix = suffix, dry = dry, echo = !many),
+      error = function(e) {
+        failed <<- c(failed, sprintf("%s: %s", d, conditionMessage(e)))
+        NULL
+      })
+    if (!is.null(r)) out <- c(out, r)
+  }
+
+  if (length(failed)) {
+    warning(length(failed), " of ", length(dirs),
+            " directory/directories could not be regenerated:\n  ",
+            paste(failed, collapse = "\n  "), call. = FALSE)
+  }
+  if (many)
+    message(sprintf("methylQC: %d report(s) written, %d failed",
+                    length(out), length(failed)))
+  invisible(if (length(out) == 1L) out[[1]] else out)
+}
+
+#' Regenerate one output directory's QC panels
 #'
 #' Recomputes only what a threshold change actually invalidates. PCA, MDS and
 #' the beta density panels are frozen, so they never need recomputing; the
@@ -364,18 +470,16 @@ prep <- function(dir, s1 = NULL, cols = NULL, info = NULL, collapse = NULL,
 #'   instead of overwriting the canonical ones.
 #' @param dry print the plan and return without doing the work.
 #' @return the PDF path, invisibly.
-#' @export
-#' @examples
-#' \dontrun{
-#' qcplots("~/qcout", detp = 0.01, dry = TRUE)
-#' qcplots("~/qcout", detp = 0.01, suffix = "detp01")
-#' }
-qcplots <- function(dir, detp = NULL, samplemin = NULL, failmin = NULL,
+#' @keywords internal
+#' @noRd
+.qcplots_one <- function(dir, detp = NULL, samplemin = NULL, failmin = NULL,
                     intmad = NULL, intfloor = NULL, inclqual = NULL,
-                    suffix = NULL, dry = FALSE) {
+                    suffix = NULL, dry = FALSE, echo = TRUE) {
 
   mqccheckdir(dir)
-  lg <- makelog(mqcpath(dir, "log", create = TRUE))
+  ## Across many directories the per-run echo drowns the progress lines; the
+  ## log file still receives every message either way.
+  lg <- makelog(mqcpath(dir, "log", create = TRUE), echo = echo)
   on.exit(lg$close(), add = TRUE)
 
   cc <- loadcache(dir, lg)

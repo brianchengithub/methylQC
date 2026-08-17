@@ -612,3 +612,37 @@ test_that("chip position columns survive into the metrics frame", {
   expect_true(all(c("sentrix_slide", "sentrix_row", "sentrix_col",
                     "Plate", "Well") %in% names(out)))
 })
+
+test_that("qcplots finds every output directory beneath a parent", {
+  root <- file.path(tempdir(), paste0("mp", as.integer(runif(1) * 1e6)))
+  on.exit(unlink(root, recursive = TRUE))
+  mk <- function(p) {
+    d <- file.path(root, p)
+    dir.create(mqcpath(d, "qc", create = TRUE), recursive = TRUE,
+               showWarnings = FALSE)
+    saveRDS(list(cache_version = 3L), mqcpath(d, "cache"))
+    d
+  }
+  a <- mk("projA"); b <- mk("projB"); c3 <- mk("nested/deep/projC")
+
+  ## A parent resolves to every project beneath it, sorted.
+  expect_equal(methylQC:::.find_outdirs(root), sort(c(a, b, c3)))
+  ## An output directory resolves to itself, not to its children.
+  expect_equal(methylQC:::.find_outdirs(a), a)
+})
+
+test_that("a directory with Stage 1 output but no cache says to run prep", {
+  d <- file.path(tempdir(), paste0("s1", as.integer(runif(1) * 1e6)))
+  on.exit(unlink(d, recursive = TRUE))
+  dir.create(dirname(mqcpath(d, "betas")), recursive = TRUE)
+  saveRDS(1, mqcpath(d, "betas"))
+  expect_error(methylQC:::.find_outdirs(d), "Run prep\\(\\) on them first")
+})
+
+test_that("a path with no methylQC output at all is named explicitly", {
+  d <- file.path(tempdir(), paste0("empty", as.integer(runif(1) * 1e6)))
+  dir.create(d); on.exit(unlink(d, recursive = TRUE))
+  expect_error(methylQC:::.find_outdirs(d), "no methylQC output found")
+  expect_error(methylQC:::.find_outdirs(file.path(d, "nope")),
+               "does not exist")
+})

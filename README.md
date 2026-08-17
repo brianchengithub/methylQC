@@ -208,6 +208,27 @@ qcplots("~/qcout", detp = 0.01)                  # do it
 qcplots("~/qcout", detp = 0.01, suffix = "d01")  # side by side, nothing overwritten
 ```
 
+`dir` can also be a **parent holding many projects**. Every output directory
+beneath it is found by its `qc/qccache.rds` and regenerated in turn, so a whole
+set of analyses can be brought up to date in one call:
+
+```r
+qcplots("~/projects")                 # redraw every project's report
+qcplots("~/projects", detp = 0.01)    # ... at a new threshold
+```
+
+```
+methylQC: 3 output directories found under ~/projects
+  [1/3] ~/projects/cohortA/out
+  [2/3] ~/projects/cohortB/out
+  [3/3] ~/projects/pilot/out
+methylQC: 3 report(s) written, 0 failed
+```
+
+One project failing does not stop the rest — failures are collected and
+reported at the end. Per-run logging is quietened in this mode; each project's
+`logs/pipeline.log` still receives everything.
+
 Only the PCA and MDS *coordinates* are frozen — their input probe set does not
 depend on any tunable threshold — so every panel is redrawn and a retune is
 typically sub-second. Call rates come
