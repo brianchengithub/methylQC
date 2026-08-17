@@ -553,3 +553,62 @@ test_that("Sentrix barcodes split into slide, row and column", {
   expect_equal(p$sentrix_row,   c("06", "03", NA, NA))
   expect_equal(p$sentrix_col,   c("01", "02", NA, NA))
 })
+
+test_that("the standard PC variables are assembled from chip and well position", {
+  qc <- data.frame(
+    sample_id = paste0("s", 1:8),
+    sentrix_slide = rep(c("200607130026", "200607130044"), each = 4),
+    sentrix_row = rep(c("01", "02", "03", "04"), 2),
+    sentrix_col = rep(c("01", "02"), 4),
+    Well = c("A01", "B02", "C03", "D04", "E05", "F06", "G07", "H08"),
+    Plate = rep(c("P1", "P2"), each = 4),
+    reported_age = c(30, 40, 50, 60, 35, 45, 55, 65),
+    reported_sex = rep(c("F", "M"), 4),
+    stringsAsFactors = FALSE)
+  v <- methylQC:::.pc_required_vars(qc)
+
+  expect_true(all(c("slide", "slide_row", "slide_col", "plate",
+                    "well_row", "well_col", "age", "sex") %in% names(v)))
+  expect_equal(v$well_row, c("A", "B", "C", "D", "E", "F", "G", "H"))
+  expect_equal(v$well_col, c("1", "2", "3", "4", "5", "6", "7", "8"))
+  expect_equal(v$slide_row, qc$sentrix_row)
+
+  ## A constant or absent variable earns no page.
+  qc2 <- qc; qc2$Plate <- "P1"; qc2$Well <- NULL
+  v2 <- methylQC:::.pc_required_vars(qc2)
+  expect_false("plate" %in% names(v2))
+  expect_false(any(c("well_row", "well_col") %in% names(v2)))
+})
+
+test_that("age is treated as continuous and sex as categorical", {
+  set.seed(31)
+  y <- rnorm(40)
+  age <- seq(20, 80, length.out = 40)
+  expect_true(methylQC:::.pc_is_continuous(age))
+  expect_false(methylQC:::.pc_is_continuous(rep(c("F", "M"), 20)))
+  expect_false(methylQC:::.pc_is_continuous(rep(1:4, 10)))   # a plate number
+
+  expect_match(methylQC:::.pc_stat(y, age)$label, "^r = ")
+  expect_match(methylQC:::.pc_stat(y, rep(c("F", "M"), 20))$label, "^eta2 = ")
+})
+
+test_that("a PC page holds at most six panels", {
+  expect_lte(methylQC:::.MQC_PC_NPC, 6L)
+})
+
+test_that("chip position columns survive into the metrics frame", {
+  ## The PC pages cannot show a variable that never reached this frame.
+  f <- methylQC:::.carry_meta
+  qcm <- data.frame(sample_id = c("a", "b"), call_rate = c(0.99, 0.98),
+                    stringsAsFactors = FALSE)
+  ss <- data.frame(sample_id = c("a", "b"),
+                   sentrix_slide = c("2006", "2006"),
+                   sentrix_row = c("01", "02"), sentrix_col = c("01", "01"),
+                   Plate = c("P1", "P2"), Well = c("A01", "B02"),
+                   stringsAsFactors = FALSE)
+  cols <- list(sex = NA_character_, age = NA_character_, batch = NA_character_,
+               cell = NA_character_, donor = NA_character_)
+  out <- f(qcm, ss, cols)
+  expect_true(all(c("sentrix_slide", "sentrix_row", "sentrix_col",
+                    "Plate", "Well") %in% names(out)))
+})

@@ -540,8 +540,16 @@ makemat <- function(dir, what = c("betas", "detp"), write = FALSE) {
 ## Copy the resolved metadata columns onto the metrics frame, so that
 ## flagsamples() can see reported sex and age.
 .carry_meta <- function(qcm, ss, cols) {
+  ## The resolved metadata columns, plus the chip-position columns discover()
+  ## parsed from the Sentrix barcode and anything that looks like a plate or
+  ## well. These all end up on the PC/metadata pages, which cannot show a
+  ## variable that never reached this frame.
   want <- stats::na.omit(unlist(cols[c("sex", "age", "batch", "cell", "donor")]))
-  want <- intersect(unique(as.character(want)), names(ss))
+  extra <- c(.MQC_POSITION_COLS, "Plate", "Sample_Plate", "Sample_Group",
+             "Well", "Sample_Well", "Well_Position", "Sentrix_Position",
+             "Slide", "Chip", "Sentrix_ID")
+  want <- c(as.character(want), intersect(names(ss), extra))
+  want <- intersect(unique(want), names(ss))
   want <- setdiff(want, names(qcm))
   if (!length(want)) return(qcm)
   .assign_cols(qcm, ss[, c("sample_id", want), drop = FALSE], "sample_id")

@@ -32,11 +32,12 @@
 ## Probes carried into the MDS distance, from the PCA input.
 .MQC_MDS_NTOP   <- 5000L
 
-## The expanded PC/metadata pages: minimum association worth a panel, panels
-## per page, and a cap so a sheet with many columns cannot bloat the report.
-.MQC_PC_MINETA    <- 0.10
-.MQC_PC_PERPAGE   <- 8L
-.MQC_PC_MAXPANELS <- 24L
+## The PC/metadata pages. Six panels to a page, one page per variable. The
+## standard variables always get a page; anything else in the sheet needs to
+## reach MINETA against some PC, and MAXEXTRA caps how many such pages a wide
+## sample sheet can add.
+.MQC_PC_MINETA   <- 0.10
+.MQC_PC_MAXEXTRA <- 6L
 
 ## Columns methylQC itself produces. Excluded from the PC/metadata panel so a
 ## component cannot be "explained" by a flag derived from the same matrix.
@@ -662,118 +663,211 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
   out[order(out$pc, -out$eta2), , drop = FALSE]
 }
 
-## One panel per PC, each coloured by the categorical variable that PC tracks
-## most strongly, so the reader can see what the top components represent.
-.p_pcvars <- function(cc, qc, th, logger, npc = 6L) {
+## ---------------------------------------------------------------------------
+## PC versus metadata
+##
+## Six panels to a page, one page per variable, PC1 through PC6 down the page.
+## A fixed set of variables is ALWAYS tested whether or not it associates with
+## anything -- chip slide, chip row and column, plate, well row and column, age
+## and sex -- because "this component is not the plate" is as useful to see as
+## the converse, and an absent page is indistinguishable from a page that was
+## never drawn.
+## ---------------------------------------------------------------------------
+
+## PCs carried into the metadata pages.
+.MQC_PC_NPC <- 6L
+
+#' The variables that always get a page
+#'
+#' Chip position comes from the Sentrix barcode (parsed by \code{discover()});
+#' plate position comes from a well column if the sheet has one. Row and column
+#' are offered for both, since a cohort can be laid out on chips, on plates, or
+#' on both, and either layout can carry a batch effect.
+#'
+#' @param qc the flagged metrics frame, joined to the sample sheet.
+#' @return a named list of vectors; absent variables are dropped.
+#' @keywords internal
+#' @noRd
+.pc_required_vars <- function(qc) {
+  cfg <- mqcopts()
+  col <- function(cands) {
+    nm <- .resolve_col(qc, cands)
+    if (is.na(nm)) NULL else qc[[nm]]
+  }
+
+  ## A96-style well: letter is the row, digits the column.
+  wr <- wc <- NULL
+  well <- col(c("Well", "Sample_Well", "Well_Position", "WellPosition",
+                "Sentrix_Position"))
+  if (!is.null(well)) {
+    w <- toupper(trimws(as.character(well)))
+    hit <- grepl("^[A-P]0?[0-9]{1,2}$", w)
+    if (any(hit, na.rm = TRUE)) {
+      wr <- ifelse(hit, sub("^([A-P]).*$", "\\1", w), NA_character_)
+      wc <- ifelse(hit, sub("^[A-P]0?([0-9]{1,2})$", "\\1", w), NA_character_)
+    }
+  }
+
+  out <- list(
+    slide      = qc$sentrix_slide %||% col(c("Slide", "Chip", "Sentrix_ID",
+                                             "SentrixID", "Sentrix_Barcode")),
+    slide_row  = qc$sentrix_row %||% NULL,
+    slide_col  = qc$sentrix_col %||% NULL,
+    plate      = col(c("Plate", "Sample_Plate", "Sample_Group", "batch_folder")),
+    well_row   = wr,
+    well_col   = wc,
+    age        = if (!is.null(qc$reported_age) && any(is.finite(qc$reported_age)))
+                   qc$reported_age else col(c(cfg$agecol, cfg$agealiases)),
+    sex        = qc$reported_sex %||% col(c(cfg$sexcol, cfg$sexaliases)))
+
+  ## Drop anything absent, constant, or entirely missing -- a panel of one
+  ## level says nothing.
+  keep <- vapply(out, function(v) {
+    if (is.null(v)) return(FALSE)
+    u <- unique(v[!is.na(v)])
+    length(u) > 1L
+  }, logical(1))
+  out[keep]
+}
+
+## Is this variable continuous enough to deserve a scatter rather than a
+## boxplot? Age is the one that matters; a numeric plate number is not.
+.pc_is_continuous <- function(v)
+  is.numeric(v) && length(unique(v[!is.na(v)])) > 12L
+
+## The association statistic for one PC against one variable, as a label.
+.pc_stat <- function(y, v) {
+  ok <- !is.na(y) & !is.na(v)
+  if (sum(ok) < 4L) return(list(value = NA_real_, label = "too few samples"))
+  if (.pc_is_continuous(v)) {
+    r <- suppressWarnings(stats::cor(y[ok], as.numeric(v[ok])))
+    return(list(value = if (is.finite(r)) r^2 else NA_real_,
+                label = sprintf("r = %.2f", r)))
+  }
+  g <- factor(as.character(v[ok]))
+  if (length(unique(g)) < 2L) return(list(value = NA_real_, label = "one level"))
+  f <- tryCatch(stats::aov(y[ok] ~ g), error = function(e) NULL)
+  if (is.null(f)) return(list(value = NA_real_, label = "not estimable"))
+  ss <- summary(f)[[1]][["Sum Sq"]]
+  if (length(ss) < 2L || sum(ss) <= 0)
+    return(list(value = NA_real_, label = "no variance"))
+  p <- tryCatch(summary(f)[[1]][["Pr(>F)"]][1], error = function(e) NA_real_)
+  e2 <- ss[1] / sum(ss)
+  list(value = e2, label = sprintf("eta2 = %.2f%s", e2,
+                                   if (is.na(p)) "" else sprintf(", p = %.2g", p)))
+}
+
+## One PC against one variable.
+.pc_one_panel <- function(y, v, k, ve, varname, th) {
+  st <- .pc_stat(y, v)
+  ttl <- sprintf("PC%d (%.1f%%) ~ %s", k, ve, varname)
+  sub <- st$label
+  if (is.finite(st$value) && st$value < 0.10) sub <- paste0(sub, "  (weak)")
+
+  if (.pc_is_continuous(v)) {
+    d <- data.frame(x = as.numeric(v), y = y)
+    d <- d[stats::complete.cases(d), , drop = FALSE]
+    return(ggplot2::ggplot(d, ggplot2::aes(.data$x, .data$y)) +
+      ggplot2::geom_point(size = 1.1, alpha = 0.85, colour = "steelblue") +
+      ggplot2::geom_smooth(method = "lm", formula = y ~ x, se = FALSE,
+                           linewidth = 0.4, colour = "grey40") + th +
+      ggplot2::theme(plot.title = ggplot2::element_text(size = 9)) +
+      ggplot2::labs(title = ttl, subtitle = sub, x = varname,
+                    y = sprintf("PC%d", k)))
+  }
+  d <- data.frame(grp = factor(as.character(v)), y = y)
+  d <- d[!is.na(d$grp) & !is.na(d$y), , drop = FALSE]
+  ggplot2::ggplot(d, ggplot2::aes(.data$grp, .data$y, colour = .data$grp)) +
+    ggplot2::geom_boxplot(outlier.shape = NA, colour = "grey60", fill = NA,
+                          linewidth = 0.3) +
+    ggplot2::geom_jitter(width = 0.18, height = 0, size = 0.9, alpha = 0.8) +
+    ggplot2::guides(colour = "none") + th +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1,
+                                                       size = 6),
+                   plot.title = ggplot2::element_text(size = 9)) +
+    ggplot2::labs(title = ttl, subtitle = sub, x = NULL,
+                  y = sprintf("PC%d", k))
+}
+
+## One page: PC1..PC6 against a single variable.
+.pc_page <- function(sc, v, varname, ve, th) {
+  n <- min(.MQC_PC_NPC, ncol(sc))
+  grobs <- lapply(seq_len(n), function(k)
+    .pc_one_panel(sc[, k], v, k, ve[k], varname, th))
+  gridExtra::grid.arrange(
+    grobs = grobs, ncol = 3,
+    top = sprintf("Principal components versus %s", varname))
+  invisible(NULL)
+}
+
+## The driver: a summary page naming what each PC tracks, then one page per
+## variable at six panels a page.
+.p_pcvars <- function(cc, qc, th, logger, npc = .MQC_PC_NPC) {
   pc <- cc$pca
   if (is.null(pc) || is.null(pc$scores)) return(invisible(NULL))
   sc <- pc$scores
   i <- match(rownames(sc), qc$sample_id)
+  qc <- qc[i, , drop = FALSE]
+  ve <- (pc$sdev^2 / sum(pc$sdev^2)) * 100
+  npc <- min(npc, ncol(sc))
 
+  ## ---- the variables that always get a page ------------------------------
+  req <- .pc_required_vars(qc)
+  ## Two names can resolve to the same column -- "plate" and batch_folder, or
+  ## sex and reported_sex -- and a second page of identical data is noise.
+  seen <- character(0)
+  fingerprint <- function(v) paste(as.character(v), collapse = "\r")
+  req <- req[!duplicated(vapply(req, fingerprint, character(1)))]
+  if (length(req)) {
+    for (nm in names(req)) {
+      seen <- c(seen, fingerprint(req[[nm]]))
+      .pc_page(sc, req[[nm]], nm, ve, th)
+    }
+    logger$log("plots", sprintf(
+      "PC pages for the standard variables: %s", paste(names(req), collapse = ", ")))
+  }
+  missing <- setdiff(c("slide", "slide_row", "slide_col", "plate",
+                       "well_row", "well_col", "age", "sex"), names(req))
+  if (length(missing))
+    logger$log("plots", sprintf(
+      "no PC page for %s: absent from the sample sheet, or constant",
+      paste(missing, collapse = ", ")))
+
+  ## ---- anything else in the sheet that actually associates ---------------
   ## Only genuine sample metadata is eligible. methylQC's own outputs are
   ## excluded: associating a component with `flagged` or `mds_outlier` is
   ## circular -- those are derived from the same beta matrix the PCA is built
   ## on -- and it crowds out the batch or tissue variable the panel exists to
-  ## surface. `reported_sex` stays, because that came from the sample sheet.
-  meta <- qc[i, setdiff(names(qc), .MQC_DERIVED_COLS), drop = FALSE]
+  ## surface.
+  drop <- c(.MQC_DERIVED_COLS, .MQC_POSITION_COLS, names(req),
+            "Slide", "Chip", "Sentrix_ID", "Plate", "Well", "Sample_Well")
+  meta <- qc[, setdiff(names(qc), drop), drop = FALSE]
   meta <- meta[, !grepl("^(cell_|age_|mean_|n_probes|na_intensity|inf1_|rg_)",
                         names(meta)), drop = FALSE]
-  ## A column with one level everywhere explains nothing.
   meta <- meta[, vapply(meta, function(v) length(unique(v[!is.na(v)])) > 1L,
                         logical(1)), drop = FALSE]
-  if (!ncol(meta)) {
-    logger$log("plots", "no categorical metadata with which to annotate the PCs")
-    return(invisible(NULL))
-  }
+  ## Drop anything that repeats a page already drawn, by value not by name.
+  if (ncol(meta))
+    meta <- meta[, !vapply(meta, function(v) fingerprint(v) %in% seen,
+                           logical(1)), drop = FALSE]
+  if (!ncol(meta)) return(invisible(NULL))
 
   assoc <- .pcassoc(sc, meta, npc)
-  if (is.null(assoc)) {
-    logger$log("plots", "no categorical metadata with which to annotate the PCs")
+  if (is.null(assoc)) return(invisible(NULL))
+  best <- stats::aggregate(eta2 ~ variable, data = assoc, FUN = max)
+  best <- best[best$eta2 >= .MQC_PC_MINETA, , drop = FALSE]
+  best <- utils::head(best[order(-best$eta2), , drop = FALSE], .MQC_PC_MAXEXTRA)
+  if (!nrow(best)) {
+    logger$log("plots", sprintf(
+      "no further metadata variable reaches eta2 %.2f against PC1-%d",
+      .MQC_PC_MINETA, npc))
     return(invisible(NULL))
   }
-
-  ve <- (pc$sdev^2 / sum(pc$sdev^2)) * 100
-  panels <- list()
-  for (k in seq_len(min(npc, ncol(sc)))) {
-    best <- assoc[assoc$pc == k, , drop = FALSE]
-    if (!nrow(best)) next
-    best <- best[1, ]
-    d <- data.frame(score = sc[, k],
-                    grp = factor(as.character(meta[[best$variable]])),
-                    stringsAsFactors = FALSE)
-    d <- d[!is.na(d$grp), , drop = FALSE]
-    if (!nrow(d)) next
-    panels[[length(panels) + 1L]] <-
-      ggplot2::ggplot(d, ggplot2::aes(.data$grp, .data$score,
-                                      colour = .data$grp)) +
-      ggplot2::geom_boxplot(outlier.shape = NA, colour = "grey60",
-                            fill = NA, linewidth = 0.3) +
-      ggplot2::geom_jitter(width = 0.18, height = 0, size = 1.1, alpha = 0.85) +
-      ggplot2::guides(colour = "none") + th +
-      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1,
-                                                         size = 7)) +
-      ggplot2::labs(
-        title = sprintf("PC%d (%.1f%%) ~ %s", k, ve[k], best$variable),
-        subtitle = sprintf("eta2 = %.2f%s%s", best$eta2,
-                           if (is.na(best$p)) "" else sprintf(", p = %.2g", best$p),
-                           if (best$eta2 < 0.10) "  (weak)" else ""),
-        x = NULL, y = sprintf("PC%d", k))
-  }
-  if (length(panels))
-    gridExtra::grid.arrange(
-      grobs = panels, ncol = 3,
-      top = "Top principal components against the metadata they track most strongly")
+  for (k in seq_len(nrow(best)))
+    .pc_page(sc, meta[[best$variable[k]]], best$variable[k], ve, th)
   logger$log("plots", sprintf(
-    "PC/metadata panel: %s",
-    paste(sprintf("PC%d~%s(eta2=%.2f)", assoc$pc[!duplicated(assoc$pc)],
-                  assoc$variable[!duplicated(assoc$pc)],
-                  assoc$eta2[!duplicated(assoc$pc)]), collapse = ", ")))
-
-  ## ---- the rest of the metadata, strongest associations first -------------
-  ## The grid above answers "what does each PC represent" by showing only the
-  ## single best variable per PC, which hides every other variable in the
-  ## sheet. These pages show the remaining PC/variable pairs ranked by
-  ## association, eight to a page, so a batch effect sitting on PC3 alongside a
-  ## stronger tissue effect is still visible.
-  shown <- paste(assoc$pc[!duplicated(assoc$pc)],
-                 assoc$variable[!duplicated(assoc$pc)])
-  rest <- assoc[!paste(assoc$pc, assoc$variable) %in% shown &
-                  is.finite(assoc$eta2) & assoc$eta2 >= .MQC_PC_MINETA, ,
-                drop = FALSE]
-  if (!nrow(rest)) return(invisible(NULL))
-  rest <- rest[order(-rest$eta2), , drop = FALSE]
-  rest <- utils::head(rest, .MQC_PC_MAXPANELS)
-
-  pages <- split(seq_len(nrow(rest)),
-                 ceiling(seq_len(nrow(rest)) / .MQC_PC_PERPAGE))
-  for (pi in seq_along(pages)) {
-    grobs <- lapply(pages[[pi]], function(j) {
-      r <- rest[j, ]
-      d <- data.frame(score = sc[, r$pc],
-                      grp = factor(as.character(meta[[r$variable]])),
-                      stringsAsFactors = FALSE)
-      d <- d[!is.na(d$grp), , drop = FALSE]
-      ggplot2::ggplot(d, ggplot2::aes(.data$grp, .data$score,
-                                      colour = .data$grp)) +
-        ggplot2::geom_boxplot(outlier.shape = NA, colour = "grey60",
-                              fill = NA, linewidth = 0.3) +
-        ggplot2::geom_jitter(width = 0.18, height = 0, size = 0.9, alpha = 0.8) +
-        ggplot2::guides(colour = "none") + th +
-        ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1,
-                                                           size = 6),
-                       plot.title = ggplot2::element_text(size = 9)) +
-        ggplot2::labs(
-          title = sprintf("PC%d ~ %s", r$pc, r$variable),
-          subtitle = sprintf("eta2 = %.2f%s", r$eta2,
-                             if (is.na(r$p)) "" else sprintf(", p = %.2g", r$p)),
-          x = NULL, y = sprintf("PC%d", r$pc))
-    })
-    gridExtra::grid.arrange(
-      grobs = grobs, ncol = 4,
-      top = sprintf("PC versus metadata, remaining associations (page %d of %d)",
-                    pi, length(pages)))
-  }
-  logger$log("plots", sprintf(
-    "%d further PC/metadata association(s) at eta2 >= %.2f, over %d page(s)",
-    nrow(rest), .MQC_PC_MINETA, length(pages)))
+    "PC pages for %d further variable(s): %s", nrow(best),
+    paste(sprintf("%s(max eta2=%.2f)", best$variable, best$eta2),
+          collapse = ", ")))
+  invisible(NULL)
 }

@@ -91,6 +91,14 @@ colouring, so a sample flagged on the first panel is identifiable on all the
 others. Flagged sample IDs and their reasons are printed to the console and the
 log, not just counted.
 
+**What each PC represents.** PC1–PC6 are tested against a fixed set of
+variables — chip slide, chip row, chip column, plate, well row, well column,
+age and sex — one variable per page, six panels to a page, whether or not they
+associate: "this component is not the plate" is as useful to see as the
+converse. Chip position is parsed from the Sentrix barcode automatically, and
+well position from a well column if your sheet has one. Any other sheet
+variable reaching η² ≥ 0.10 against some PC gets its own page too.
+
 **It tells you what it did.** `METHODS.txt` is written into every output
 directory in the register of a journal Methods section, with the run's real
 numbers substituted.
@@ -290,6 +298,7 @@ mqcreset()                   # revert
 | `dishref` / `dishmethod` | `"blood"` / `"RPC"` | EpiDISH settings |
 | `snpmin` | `0.70` | concordance below which an unrelated pair is not reported |
 | `sheetpatterns` | 4 patterns | sample sheet filename search, strictest first |
+| `failmin` | `0.10` | per-sample probe failure rate marked on the failure panel |
 | `idaliases` | see `mqcdefaults()` | accepted sample identifier column names |
 
 ---
