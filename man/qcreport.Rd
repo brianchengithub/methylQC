@@ -2,59 +2,35 @@
 % Please edit documentation in R/plots.R
 \name{qcreport}
 \alias{qcreport}
-\title{Write the QC report PDF and accompanying CSVs}
+\title{Render the QC report}
 \usage{
-qcreport(
-  ss,
-  betas,
-  betasok,
-  flagged,
-  mask,
-  detP,
-  platform,
-  pdf,
-  pccsv,
-  tailcsv,
-  logger = NULL
-)
+qcreport(qc, cc, probe_fail, out, failcsv, pccsv, cfg = NULL, logger = NULL)
 }
 \arguments{
-\item{ss}{Sample sheet with QC metrics merged (rows = samples, must
-include \code{sample_id}, \code{frac_dt}, and -- where available --
-\code{mean_intensity}, \code{sex_chrX_intensity}, \code{sex_chrY_intensity},
-\code{horvath_age}).}
+\item{qc}{per-sample metrics, already flagged.}
 
-\item{betas}{Unmasked beta matrix (probes x samples) used for the
-beta-density panel and for MDS.}
+\item{cc}{the QC cache.}
 
-\item{betasok}{Quality-masked / detection-masked beta matrix (probes
-x samples) used for the scree and PCA panels.}
+\item{probe_fail}{named numeric vector of per-probe failure rates.}
 
-\item{flagged}{Output of internal \code{qcflags()} -- data.frame of
-per-sample low-detection / low-intensity flags. Used ONLY for
-colouring the detection-rate, intensity, and beta-density panels.}
+\item{out}{destination PDF path.}
 
-\item{mask}{Quality + detection mask matrix (probes x samples,
-logical). May be NULL.}
+\item{failcsv}{destination for the failing-probe list.}
 
-\item{detP}{Detection p-value matrix (probes x samples). May be NULL;
-if so, the probe-failure histogram falls back to \code{mask} or
-to \code{is.na(betas)}.}
+\item{pccsv}{destination for PC scores.}
 
-\item{platform}{Platform string (e.g. "EPIC"), used to look up sex probes.}
+\item{cfg}{options list.}
 
-\item{pdf}{Output PDF path.}
-
-\item{pccsv}{Output CSV path for PC scores.}
-
-\item{tailcsv}{Output CSV path for tail-probe failure rates.}
-
-\item{logger}{Optional logger.}
+\item{logger}{optional logger.}
 }
 \value{
-Invisibly, a list with sex_mismatch_ids, sex_unclear_ids,
-age_outlier_ids, sex_detail, age_detail.
+\code{out}, invisibly.
 }
 \description{
-Write the QC report PDF and accompanying CSVs
+Render the QC report
+}
+\examples{
+\dontrun{
+qcreport(qc, cc, probe_fail, "qc_plots.pdf", "failed_probes.csv", "pc.csv")
+}
 }

@@ -2,23 +2,65 @@
 % Please edit documentation in R/pipeline.R
 \name{qc}
 \alias{qc}
-\title{Stage 1: Preprocessing and QC metric computation}
+\title{Run the methylQC pipeline}
 \usage{
-qc(indir, outdir, platform = NULL, ...)
+qc(
+  indir,
+  outdir,
+  platform = NULL,
+  sheet = NULL,
+  workers = NULL,
+  batch = NULL,
+  extreme = NULL,
+  savesdf = NULL,
+  collapse = NULL,
+  stage2 = TRUE,
+  plan = NULL
+)
 }
 \arguments{
-\item{indir}{Input directory containing IDATs (recursive).}
+\item{indir}{directory containing IDAT files.}
 
-\item{outdir}{Output directory (created if needed).}
+\item{outdir}{destination directory; created if absent.}
 
-\item{platform}{Optional platform string; auto-detected if NULL.}
+\item{platform}{platform string; inferred when \code{NULL}.}
 
-\item{...}{Option overrides forwarded to \code{\link{mqcset}}.}
+\item{sheet}{optional explicit sample sheet path.}
+
+\item{workers}{forked worker processes; \code{NULL} inherits from the plan.}
+
+\item{batch}{samples per task; \code{NULL} inherits from the plan.}
+
+\item{extreme}{extreme memory conservation mode.}
+
+\item{savesdf}{retain preprocessed SigDF objects. The preflight withdraws
+this when the cohort is too large to hold them; nothing else depends on
+them, so the run is unaffected.}
+
+\item{collapse}{resolve EPICv2 replicate probes; \code{NA} decides
+automatically from the probe identifiers.}
+
+\item{stage2}{also run Stage 2.}
+
+\item{plan}{an existing plan from \code{\link{qcplan}}, to avoid measuring
+twice.}
 }
 \value{
-Invisibly, a list with betas, mvals, mask, detP, sample_sheet,
-platform.
+the output directory, invisibly.
 }
 \description{
-Stage 1: Preprocessing and QC metric computation
+Stage 1 reads and preprocesses every IDAT pair; Stage 2 derives quality
+metrics, calls sex, estimates cell composition and epigenetic age, and
+writes the QC report.
+}
+\details{
+When \code{workers}, \code{batch} and \code{savesdf} are not supplied they
+are inherited from \code{\link{qcplan}}, which measures actual memory use on
+this machine.
+}
+\examples{
+\dontrun{
+qcplan("~/idats")
+qc("~/idats", "~/qcout")
+}
 }

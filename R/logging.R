@@ -1,38 +1,78 @@
-###############################################################################
-# logging.R — Simple file + console logger
-#
-# Provides timestamped logging to both the R console (via message()) and
-# a persistent log file (pipeline_diagnostics.log). Each log entry includes
-# a timestamp, a step label (e.g. "runsesame", "qcflags"), and the message
-# text. The log file is append-only and persists across pipeline runs.
-###############################################################################
-#' Create a file + console logger
+## ---------------------------------------------------------------------------
+## logging.R -- a tiny append-only logger.
+## ---------------------------------------------------------------------------
+
+#' Create a pipeline logger
 #'
-#' @param outdir Directory where the log file will be written.
-#' @return A list with \code{log(step, msg)} function and \code{path}.
+#' Returns an object with a \code{$log(stage, message, warn = FALSE)} method
+#' that appends a timestamped line to the log file and echoes it to the
+#' console. When \code{warn = TRUE} an R \code{warning()} is also raised, so
+#' failures are visible in an interactive session rather than only in the file.
+#'
+#' @param path log file path; the containing directory is created.
+#' @param echo print each line to the console as well.
+#' @return a list with \code{$log()}, \code{$path} and \code{$close()}.
 #' @export
-makelog <- function(outdir) {
-  log_path <- file.path(outdir, "pipeline_diagnostics.log")
-  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
-  if (!file.exists(log_path)) {
-    cat("=== Pipeline log started:", as.character(Sys.time()), "===\n",
-        file = log_path)
+#' @examples
+#' lg <- makelog(file.path(tempdir(), "demo.log"))
+#' lg$log("demo", "hello")
+#' lg$close()
+makelog <- function(path, echo = TRUE) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  con <- file(path, open = "at")
+
+  log_fn <- function(stage, message, warn = FALSE) {
+    line <- sprintf("[%s] %-12s %s",
+                    format(Sys.time(), "%Y-%m-%d %H:%M:%S"), stage, message)
+    try(writeLines(line, con), silent = TRUE)
+    try(flush(con), silent = TRUE)
+    if (isTRUE(echo)) message(line)
+    if (isTRUE(warn)) warning(sprintf("[%s] %s", stage, message), call. = FALSE)
+    invisible(line)
   }
 
-  log_fn <- function(step, msg) {
-    line <- sprintf("[%s] %s :: %s",
-                    format(Sys.time(), "%Y-%m-%d %H:%M:%S"), step, msg)
-    message(line)
-    cat(line, "\n", file = log_path, append = TRUE)
-  }
-
-  list(log = log_fn, path = log_path)
+  list(
+    log   = log_fn,
+    path  = path,
+    close = function() try(close(con), silent = TRUE)
+  )
 }
 
-#' Append a captured object to the logger's file
-#' @param logger A logger from \code{\link{makelog}}.
-#' @param obj Any object; printed via \code{print()}.
+## A logger that discards everything, so that internal functions can take
+## `logger = NULL` without every call site guarding with is.null().
+#' @keywords internal
+#' @noRd
+nulllog <- function() {
+  list(log = function(stage, message, warn = FALSE) {
+        if (isTRUE(warn)) warning(sprintf("[%s] %s", stage, message), call. = FALSE)
+        invisible(NULL)
+       },
+       path = NA_character_,
+       close = function() invisible(NULL))
+}
+
+#' Capture output, messages and warnings from an expression into a log
+#'
+#' @param expr expression to evaluate
+#' @param logger a logger from \code{\link{makelog}}
+#' @param stage stage label recorded against each captured line
+#' @return the value of \code{expr}
 #' @export
-logcapture <- function(logger, obj) {
-  utils::capture.output(print(obj), file = logger$path, append = TRUE)
+#' @examples
+#' lg <- makelog(file.path(tempdir(), "demo2.log"))
+#' logcapture(message("working"), lg, "demo")
+#' lg$close()
+logcapture <- function(expr, logger, stage = "capture") {
+  logger <- logger %||% nulllog()
+  withCallingHandlers(
+    expr,
+    message = function(m) {
+      logger$log(stage, sub("\n$", "", conditionMessage(m)))
+      invokeRestart("muffleMessage")
+    },
+    warning = function(w) {
+      logger$log(stage, paste("WARNING:", conditionMessage(w)))
+      invokeRestart("muffleWarning")
+    }
+  )
 }

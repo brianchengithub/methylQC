@@ -1,7 +1,13 @@
 ^\.Rproj\.user$
 ^.*\.Rproj$
 ^\.github$
+^\.git$
 ^\.gitignore$
+^\.gitattributes$
+^\.claude$
+^\.DS_Store$
 ^README\.Rmd$
 ^LICENSE\.md$
 ^METHODS\.md$
+^data-raw$
+^scratch$

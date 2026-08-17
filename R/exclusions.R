@@ -1,193 +1,209 @@
-###############################################################################
-# exclusions.R — Sample flagging, SNP probe extraction, sex-probe lookup
-#
-# methylQC NEVER removes samples or probes automatically. This file holds:
-#
-#   qcflags()     — internal. Per-sample low-detection / low-intensity flags
-#                   used ONLY to colour QC-report plots. Writes no file and
-#                   feeds no exclusion list.
-#   flagsamples() — exported. A standalone utility: given a detection p-value
-#                   matrix and a call-rate threshold, writes a CSV listing
-#                   samples below the threshold. Advisory only — the user
-#                   decides whether to feed those IDs to cleanmat(dropsamples=).
-#   snpbetas()    — exported. Extracts the rs (SNP) probe sub-matrix.
-#   sexprobes()   — internal. Sex-chromosome probe IDs from the manifest.
-#
-# There is no probe-exclusion table and no exclude_probes.csv. Probe-level
-# masking is carried entirely by the mask and detP matrices (see cleanmat()).
-###############################################################################
+## ---------------------------------------------------------------------------
+## exclusions.R -- sample-level flags: call rate, intensity, sex, age.
+## ---------------------------------------------------------------------------
 
-#' Per-sample QC flags for plot colouring (internal)
+#' Normalise a reported sex column to M / F / NA
 #'
-#' Produces low-detection and low-intensity flags from the merged sample
-#' sheet. Used only to colour the detection-rate and intensity QC plots.
-#' Sex mismatches and age outliers are deliberately NOT flagged here —
-#' they are computed by, and belong to, their own QC-report pages.
-#'
-#' This function writes nothing to disk and produces no exclusion list.
-#'
-#' @param ss Sample sheet merged with QC metrics.
-#' @param logger Optional logger.
-#' @return A \code{data.frame} (one row per flagged sample) with columns
-#'   sample_id, frac_dt, frac_usable, reason. Empty if nothing is flagged.
-#' @keywords internal
-#' @noRd
-qcflags <- function(ss, logger = NULL) {
-  cfg  <- mqcopts()
-  cols <- colnames(ss)
-
-  has_intensity <- "mean_intensity" %in% cols
-  has_frac_dt   <- "frac_dt" %in% cols
-  has_batch     <- "batch_folder" %in% cols
-
-  if (!has_frac_dt) {
-    stop("Sample sheet does not contain `frac_dt` column. ",
-         "Did you forget to merge in qcmetrics() output?")
-  }
-
-  reasons <- vapply(seq_len(nrow(ss)), function(i) {
-    row <- ss[i, , drop = FALSE]
-    parts <- character(0)
-    if (!is.na(row$frac_dt) && row$frac_dt < cfg$samplemin) {
-      parts <- c(parts, sprintf("low_detection(%.3f)", row$frac_dt))
-    }
-    if (has_intensity && !is.na(row$mean_intensity) &&
-        row$mean_intensity < cfg$intmin) {
-      parts <- c(parts, sprintf("low_intensity(%.0f)", row$mean_intensity))
-    }
-    paste(parts, collapse = ";")
-  }, character(1))
-
-  base_cols <- list(
-    sample_id   = ss$sample_id,
-    frac_dt     = ss$frac_dt,
-    frac_usable = ss$frac_usable,
-    reason      = reasons
-  )
-  if (has_batch) {
-    base_cols <- c(
-      list(sample_id = ss$sample_id, batch_folder = ss$batch_folder),
-      base_cols[-1]
-    )
-  }
-  flags <- do.call(data.frame, c(base_cols, stringsAsFactors = FALSE))
-  flags <- flags[nchar(flags$reason) > 0, ]
-
-  if (!is.null(logger)) {
-    logger$log("qcflags",
-               sprintf("flagged %d / %d (%.1f%%) for low detection/intensity",
-                       nrow(flags), nrow(ss),
-                       100 * nrow(flags) / max(nrow(ss), 1)))
-  }
-  flags
+#' @param x character or factor vector
+#' @return a character vector of \code{"M"}, \code{"F"} or \code{NA}
+#' @export
+#' @examples
+#' normsex(c("male", "F", "Female", "1", "unknown"))
+normsex <- function(x) {
+  s <- toupper(trimws(as.character(x)))
+  out <- rep(NA_character_, length(s))
+  out[s %in% c("M", "MALE", "BOY", "1")] <- "M"
+  out[s %in% c("F", "FEMALE", "GIRL", "2")] <- "F"
+  out
 }
 
-#' Flag samples by detection call rate
+#' Parse an age column to numeric years
 #'
-#' A standalone, opt-in utility. Computes each sample's call rate from a
-#' detection p-value matrix (fraction of probes with \code{detP <= pthresh})
-#' and writes a CSV of every sample whose call rate falls below
-#' \code{callrate}.
+#' @param x vector of ages
+#' @return numeric vector; unparseable entries become \code{NA}
+#' @export
+#' @examples
+#' parseage(c("42", "7.5 years", "unknown"))
+parseage <- function(x) {
+  if (is.numeric(x)) return(as.numeric(x))
+  suppressWarnings(as.numeric(gsub("[^0-9.\\-]", "", as.character(x))))
+}
+
+#' Flag samples failing quality thresholds
 #'
-#' This function performs NO automatic exclusion. It only produces a list.
-#' To act on it, the user passes the IDs themselves to
-#' \code{\link{cleanmat}(dropsamples = ...)} — either the returned vector or a
-#' CSV they assemble. \code{flagsamples()} does not accept hand-picked IDs;
-#' it flags purely on the call-rate threshold.
+#' Applies the call-rate, intensity, sex-concordance and age-outlier checks
+#' and returns the sample sheet with flag columns added.
 #'
-#' @param detP Numeric detection p-value matrix (probes x samples), e.g.
-#'   \code{readRDS("detP_all.rds")}.
-#' @param callrate Minimum acceptable call rate. Samples below this are
-#'   flagged. Default: the \code{samplemin} option (0.95).
-#' @param pthresh Detection p-value cutoff; a probe is counted as detected
-#'   when \code{detP <= pthresh}. Default: the \code{detp} option (0.05).
-#' @param csv Output CSV path. Default \code{"flagged_samples.csv"}.
-#' @param logger Optional logger.
-#' @return Invisibly, a data.frame of ALL samples with columns sample_id,
-#'   call_rate, and flagged (logical). The CSV contains only flagged rows.
+#' Sex is called by \code{\link{sexcall}} from the sex-chromosome intensities
+#' measured during Stage 1, not by \pkg{sesame}. When the cohort does not
+#' support a call -- because it is single-sex, too small, or too noisy --
+#' \code{inferred_sex} is \code{NA} for every sample and \code{sex_mismatch} is
+#' \code{FALSE}, rather than a split being invented.
+#'
+#' @param qc per-sample metrics from \code{\link{qcmetrics}}.
+#' @param sexcol resolved reported-sex column name, or \code{NA}.
+#' @param agecol resolved age column name, or \code{NA}.
+#' @param sexinfo a \code{\link{sexcall}} result, or \code{NULL} to derive one
+#'   from the \code{sex_chrX_intensity} / \code{sex_chrY_intensity} columns.
+#' @param mdsflag named logical vector from \code{\link{mdsoutlier}}, or
+#'   \code{NULL} when the MDS coordinates are not available.
+#' @param agesd age outlier cutoff, in cohort standard deviations.
+#' @param logger optional logger.
+#' @return \code{qc} with added flag columns and a \code{flagged} /
+#'   \code{flag_reason} summary.
+#' @export
 #' @examples
 #' \dontrun{
-#' detP <- readRDS("results/detP_all.rds")
-#' flagged <- flagsamples(detP, callrate = 0.95,
-#'                        csv = "results/flagged_samples.csv")
-#' bad_ids <- flagged$sample_id[flagged$flagged]
-#'
-#' betas <- readRDS("results/betas_all.rds")
-#' mask  <- readRDS("results/mask_all.rds")
-#' betas_clean <- cleanmat(betas, mask = mask, detP = detP,
-#'                          dropsamples = bad_ids, platform = "EPIC")
+#' flagged <- flagsamples(qc, sexcol = "Reported_Sex")
 #' }
-#' @export
-flagsamples <- function(detP, callrate = NULL, pthresh = NULL,
-                        csv = "flagged_samples.csv", logger = NULL) {
-  stopifnot(is.matrix(detP) && is.numeric(detP))
-  cfg      <- mqcopts()
-  callrate <- if (is.null(callrate)) cfg$samplemin else callrate
-  pthresh  <- if (is.null(pthresh))  cfg$detp      else pthresh
+flagsamples <- function(qc, sexcol = NA_character_, agecol = NA_character_,
+                        sexinfo = NULL, mdsflag = NULL, agesd = 3,
+                        logger = NULL) {
 
-  call_rate <- colMeans(detP <= pthresh, na.rm = TRUE)
-  sample_id <- colnames(detP)
-  if (is.null(sample_id)) sample_id <- as.character(seq_along(call_rate))
+  logger <- logger %||% nulllog()
+  out <- qc
 
-  out <- data.frame(sample_id = sample_id,
-                    call_rate = call_rate,
-                    flagged   = call_rate < callrate,
-                    stringsAsFactors = FALSE)
-  flagged <- out[out$flagged, c("sample_id", "call_rate"), drop = FALSE]
+  ## ---- sex ---------------------------------------------------------------
+  out$reported_sex <- if (!is.na(sexcol) && sexcol %in% names(out))
+    normsex(out[[sexcol]]) else NA_character_
 
-  if (!is.null(csv)) {
-    utils::write.csv(flagged, csv, row.names = FALSE)
+  if (is.null(sexinfo) &&
+      all(c("sex_chrX_intensity", "sex_chrY_intensity") %in% names(out)))
+    sexinfo <- sexcall(out$sex_chrX_intensity, out$sex_chrY_intensity,
+                       out$sample_id)
+
+  if (is.null(sexinfo)) {
+    out$inferred_sex <- NA_character_
+    out$sex_unclear <- TRUE
+    out$sex_confidence <- NA_real_
+  } else {
+    m <- match(out$sample_id, sexinfo$sample_id)
+    out$inferred_sex <- sexinfo$inferred_sex[m]
+    out$sex_unclear <- sexinfo$sex_unclear[m]
+    out$sex_confidence <- sexinfo$sex_confidence[m]
+    attr(out, "sex_threshold") <- attr(sexinfo, "threshold")
+    attr(out, "sex_break") <- attr(sexinfo, "break")
+    if (!isTRUE(attr(sexinfo, "called")))
+      logger$log("sex", sprintf("no sex called: %s", attr(sexinfo, "reason")),
+                 warn = TRUE)
+    else
+      logger$log("sex", sprintf(
+        "sex called at chrY intensity %.0f (separation %.2f); %d F, %d M, %d unclear",
+        attr(sexinfo, "threshold"), attr(sexinfo, "separation"),
+        sum(out$inferred_sex == "F", na.rm = TRUE),
+        sum(out$inferred_sex == "M", na.rm = TRUE),
+        sum(out$sex_unclear, na.rm = TRUE)))
   }
-  if (!is.null(logger)) {
-    logger$log("flagsamples",
-               sprintf("call rate < %.3f: %d / %d sample(s); wrote %s",
-                       callrate, nrow(flagged), nrow(out),
-                       if (is.null(csv)) "(no file)" else csv))
+
+  both <- !is.na(out$reported_sex) & !is.na(out$inferred_sex)
+  out$sex_mismatch <- both & (out$reported_sex != out$inferred_sex)
+  out$sex_unknown <- is.na(out$reported_sex) | is.na(out$inferred_sex)
+
+  ## ---- age ---------------------------------------------------------------
+  out$reported_age <- if (!is.na(agecol) && agecol %in% names(out))
+    parseage(out[[agecol]]) else NA_real_
+  out$age_outlier <- FALSE
+  a <- out$reported_age
+  if (sum(is.finite(a)) >= 5L) {
+    mu <- mean(a, na.rm = TRUE); s <- stats::sd(a, na.rm = TRUE)
+    if (is.finite(s) && s > 0)
+      out$age_outlier <- is.finite(a) & abs(a - mu) > agesd * s
   }
-  message(sprintf(
-    "flagsamples(): %d / %d sample(s) below call rate %.3f. No samples removed.",
-    nrow(flagged), nrow(out), callrate))
-  invisible(out)
+
+  ## ---- MDS outlier --------------------------------------------------------
+  out$mds_outlier <- if (is.null(mdsflag)) FALSE else {
+    v <- unname(mdsflag[match(out$sample_id, names(mdsflag))])
+    v[is.na(v)] <- FALSE
+    v
+  }
+
+  ## ---- combine -----------------------------------------------------------
+  ## age_outlier is reported alongside the others but does NOT set `flagged`:
+  ## it describes the reported metadata distribution, not array quality, and
+  ## excluding on it would discard perfectly good arrays from an age-skewed
+  ## cohort. It still appears in flag_reason so the listing names it.
+  reasons <- list(
+    low_callrate  = out$low_callrate,
+    low_intensity = out$low_intensity,
+    sex_mismatch  = out$sex_mismatch,
+    mds_outlier   = out$mds_outlier)
+  for (k in names(reasons)) reasons[[k]][is.na(reasons[[k]])] <- FALSE
+  age_r <- out$age_outlier; age_r[is.na(age_r)] <- FALSE
+
+  out$flagged <- Reduce(`|`, reasons)
+  allr <- c(reasons, list(age_outlier = age_r))
+  out$flag_reason <- vapply(seq_len(nrow(out)), function(i) {
+    hit <- names(allr)[vapply(allr, function(v) isTRUE(v[i]), logical(1))]
+    if (!length(hit)) "" else paste(hit, collapse = ";")
+  }, character(1))
+
+  logger$log("flags", sprintf(
+    "%d of %d sample(s) flagged (call rate %d, intensity %d, sex mismatch %d, MDS outlier %d)",
+    sum(out$flagged), nrow(out), sum(reasons$low_callrate),
+    sum(reasons$low_intensity), sum(reasons$sex_mismatch),
+    sum(reasons$mds_outlier)))
+  if (any(age_r))
+    logger$log("flags", sprintf(
+      "%d age outlier(s) beyond %g SD (recorded, not used to exclude)",
+      sum(age_r), agesd))
+  out
 }
 
-#' Extract the rs (SNP) probe matrix from a beta matrix
+#' List the flagged samples, by identifier and reason
 #'
-#' Returns a samples-by-rs-probes numeric matrix for identity
-#' verification. Rows are samples, columns are rs probes.
+#' Printed to the console and written to the log, because a count alone does
+#' not tell you which array to go and look at.
 #'
-#' @param betas Full beta matrix (probes x samples).
-#' @param logger Optional logger.
-#' @return Numeric matrix (samples x rs probes), or NULL if none found.
+#' @param flags output of \code{\link{flagsamples}}.
+#' @param logger optional logger.
+#' @return the flagged rows, invisibly.
 #' @export
-snpbetas <- function(betas, logger = NULL) {
-  rs_probes <- grep("^rs", rownames(betas), value = TRUE)
-  if (length(rs_probes) == 0) {
-    if (!is.null(logger)) logger$log("snpbetas", "no rs probes found")
-    return(NULL)
+#' @examples
+#' \dontrun{
+#' reportflags(flags)
+#' }
+reportflags <- function(flags, logger = NULL) {
+  logger <- logger %||% nulllog()
+  labels <- c(low_callrate = "low call rate", low_intensity = "low intensity",
+              sex_mismatch = "sex mismatch", mds_outlier = "MDS outlier",
+              age_outlier = "age outlier")
+  pretty <- function(r) {
+    if (!nzchar(r)) return("")
+    paste(labels[strsplit(r, ";", fixed = TRUE)[[1]]], collapse = ", ")
   }
-  rs_mat <- t(betas[rs_probes, , drop = FALSE])
-  if (!is.null(logger)) {
-    logger$log("snpbetas",
-               sprintf("extracted %d rs probes x %d samples",
-                       ncol(rs_mat), nrow(rs_mat)))
+
+  sub <- flags[isTRUE_vec(flags$flagged), , drop = FALSE]
+  if (nrow(sub)) {
+    logger$log("flags", sprintf("%d flagged sample(s):", nrow(sub)))
+    ord <- order(sub$flag_reason, sub$sample_id)
+    for (i in ord)
+      logger$log("flags", sprintf("    %-28s %s", sub$sample_id[i],
+                                  pretty(sub$flag_reason[i])))
+  } else {
+    logger$log("flags", "no samples flagged")
   }
-  rs_mat
+
+  ## Age outliers do not set `flagged`, so name them separately rather than
+  ## letting them disappear.
+  ao <- flags[isTRUE_vec(flags$age_outlier) & !isTRUE_vec(flags$flagged), ,
+              drop = FALSE]
+  if (nrow(ao))
+    logger$log("flags", sprintf(
+      "%d age outlier(s), recorded but not flagged: %s",
+      nrow(ao), paste(ao$sample_id, collapse = ", ")))
+  invisible(sub)
 }
 
-#' Load sex-chromosome probe IDs from the platform manifest
-#' @keywords internal
-#' @noRd
-sexprobes <- function(platform) {
-  tryCatch({
-    mft <- sesameData::sesameDataGet(paste0(platform, ".address"))
-    if (!is.null(mft$hg38)) {
-      gr <- mft$hg38
-      chrs <- as.character(GenomicRanges::seqnames(gr))
-      return(names(gr)[chrs %in% c("chrX", "chrY")])
-    }
-    if (!is.null(mft$ordering) && "CpG_chrm" %in% colnames(mft$ordering)) {
-      return(mft$ordering$Probe_ID[mft$ordering$CpG_chrm %in% c("chrX", "chrY")])
-    }
-    character(0)
-  }, error = function(e) character(0))
+#' Samples that passed every check
+#'
+#' @param flagged output of \code{\link{flagsamples}}
+#' @return character vector of sample IDs
+#' @export
+#' @examples
+#' \dontrun{
+#' ids <- retained(flagged)
+#' }
+retained <- function(flagged) {
+  keep <- !is.na(flagged$flagged) & !flagged$flagged
+  flagged$sample_id[keep]
 }

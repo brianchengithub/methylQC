@@ -1,216 +1,215 @@
 # methylQC
 
+Quality control and preprocessing for Illumina Infinium DNA methylation
+BeadChips (HM450, EPIC v1, EPIC v2, MSA, mouse), built on
+[sesame](https://bioconductor.org/packages/sesame).
 
-**QC and preprocessing pipeline for Illumina DNA methylation arrays.**
+Reads IDATs, preprocesses every array in parallel, flags bad samples, calls sex,
+estimates cell composition and epigenetic age, and writes a QC report. Nothing
+is deleted — samples and probes are flagged, and you apply your own exclusions
+downstream.
 
-`methylQC` wraps [SeSAMe](https://bioconductor.org/packages/sesame/),
-[EpiDISH](https://bioconductor.org/packages/EpiDISH/), and standard
-Bioconductor tools into a two-stage pipeline for Illumina Infinium
-arrays (EPIC, EPICv2, 450K).
+Everything a run produces goes into one output directory, organised into
+subdirectories: the matrices under `data/matrices/`, the per-sample table and
+sidecar CSVs under `data/metadata/`, the report under `qc/`, and the log under
+`logs/`. You rarely need to know those paths — the functions below take the
+output directory and find what they need.
 
-The pipeline outputs **raw (unmasked) matrices** alongside a quality
-mask and detection p-values; nothing is excluded automatically.
-`cleanmat()` is the single function that turns those matrices into a
-filtered analysis matrix, on the user's terms.
+See [METHODS.md](METHODS.md) for what the pipeline does and why.
 
+---
 
-## Features
-
-- **Streaming preprocessing** through SeSAMe `openSesame` (one IDAT
-  pair at a time; bounded memory).
-- **Raw matrices + separate masks** — unmasked betas, quality mask
-  matrix, and detection p-value matrix are saved side by side.
-- **Configurable column names** for sample ID, donor, sex, age,
-  batch, and cell type (with alias lists).
-- **Sex check** with adaptive within-cluster regression bands.
-- **Epigenetic age prediction** via the hardcoded Horvath (2013)
-  clock (353 CpGs).
-- **SNP identity verification** via MDS on rs probes.
-- **Nine-page QC report PDF**: detection rate, probe-failure tail
-  histogram, MDS, intensity, sample beta density, sex check, age
-  check, scree, and a 2×3 panel of PC-vs-associated-variable plots.
-- **Cell-type deconvolution** (`rundish()`) via EpiDISH RPC. Default
-  reference is the 12-cell Salas 2022 panel (`cent12CT.m` on EPIC,
-  `cent12CT450k.m` on 450k). Runs as part of the pipeline by default,
-  or standalone on a Stage 2 output directory; either way, the
-  proportions are merged into `sample_sheet.csv`.
-- **`cleanmat()`** — single primitive for applying QC decisions, with optional
-  chunked k-NN imputation.
-
-## Installation
+## Install
 
 ```r
-if (!requireNamespace("BiocManager", quietly = TRUE))
-    install.packages("BiocManager")
-BiocManager::install(c("sesame", "sesameData", "EpiDISH", "impute"))
-
-devtools::install_github("brianchengithub/methylQC")
+install.packages("pak")
+pak::pkg_install("brianchengithub/methylQC")
 ```
 
-## Quick start
+That is all — `pak` resolves sesame and the other Bioconductor dependencies,
+and the annotation data is downloaded automatically on the first run.
+
+**macOS and Linux only** — parallelism uses forking.
+
+---
+
+## 1. Run the pipeline
 
 ```r
 library(methylQC)
 
-# Tell methylQC how your sample sheets are labelled
-mqcset(
-  donorcol = "SubjectID",
-  sexcol   = "gender"
-)
-
-# Stage 1 + Stage 2 in one call
 pipeline(
-  indir  = "/path/to/idats",
-  outdir = "/path/to/output"
+  indir  = "/path/to/idat/directory",
+  outdir = "/path/to/output/directory"
 )
 ```
 
-Stage 1 writes raw matrices and a sample sheet with per-sample QC
-metrics. Stage 2 writes the QC report PDF, optional EpiDISH cell
-proportions, and a consolidated sample sheet with flag columns.
+One call does everything: finds the IDATs and your sample sheet, sizes the run
+against available memory, processes every array, and writes the report. It
+prints a summary at the end, and names every flagged sample and its reason in
+the console and the log.
 
-To apply filters before downstream analysis:
+**What you get:**
 
-```r
-betas <- readRDS("output/betas_all.rds")
-mask  <- readRDS("output/mask_all.rds")
-detP  <- readRDS("output/detP_all.rds")
-ss    <- read.csv("output/sample_sheet.csv")
-
-# Standard autosomal-CpG EWAS matrix; feed cleanmat the QC CSVs directly
-betas_ewas <- cleanmat(
-  betas, mask = mask, detP = detP, pthresh = 0.05,
-  dropprobes  = "output/failed_probes.csv",
-  dropsamples = "output/flagged_samples.csv",
-  probes      = "cg",
-  platform    = "EPIC")
+```
+/path/to/output/directory/
+  METHODS.txt                          what was done, with this run's numbers
+  logs/
+    pipeline.log                       every decision the run made
+  data/
+    matrices/
+      betas_all.rds                    beta values, UNMASKED, all probes
+      detP_all.rds                     detection p-values, all probes
+      design_mask.rds                  named logical vector, platform-level
+      snp_betas.rds                    rs probe betas
+    metadata/
+      sample_sheet.csv                 one row per sample, every metric and flag
+      failed_samples.csv               arrays that could not be processed
+      failed_probes.csv                probes failing in many samples
+      pc_scores.csv
+      snp_concordance.csv
+  qc/
+    qc_plots.pdf                       the report
+    qccache.rds                        lets qcplots() redraw without reprocessing
 ```
 
-If you want an advisory list of samples below a custom call-rate
-threshold:
+Useful arguments to `pipeline()`:
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `platform` | inferred | force the array type, e.g. `"EPIC"`, `"EPICv2"`, `"HM450"` |
+| `sheet` | auto-detected | path to a sample sheet, if it is not found automatically |
+| `workers` | from preflight | forked worker processes |
+| `batch` | from preflight | samples per task |
+| `extreme` | `FALSE` | never hold a full matrix, for cohorts that will not fit in memory |
+
+---
+
+## 2. Redraw the report at a different threshold
+
+Updated QC plots without reprocessing entire pipeline. Uses only `qccache.rds`.
 
 ```r
-flagsamples(detP, callrate = 0.95,
-            csv = "output/flagged_samples.csv")
-# Then cleanmat() will consume that file directly:
-betas_clean <- cleanmat(
-  betas, mask = mask, detP = detP,
-  dropsamples = "output/flagged_samples.csv",
-  dropprobes  = "output/failed_probes.csv",
-  probes      = c("cg", "ch"),
-  platform    = "EPIC")
+qcplots("/path/to/output/directory", detp = 0.01)
 ```
 
-## Pipeline outputs
-
-| File                         | Description                                                              |
-|------------------------------|--------------------------------------------------------------------------|
-| `betas_all.rds`              | Unmasked beta matrix (no NAs from masking).                              |
-| `mvals_all.rds`              | Unmasked M-value matrix.                                                 |
-| `mask_all.rds`               | Logical mask (`TRUE` = failed quality mask or pOOBAH).                   |
-| `detP_all.rds`               | Detection p-values (pOOBAH).                                             |
-| `snp_betas.rds`              | rs-probe betas (samples × rs probes) for `snpcheck()`.                   |
-| `sample_sheet.csv`           | Sample sheet + QC metrics + flags + (optional) cell proportions.         |
-| `metadata.rds`               | Run metadata (platform, sample count, timestamp, package version).       |
-| `qc_plots.pdf`               | Nine-page QC diagnostic report (Stage 2).                                |
-| `pc_scores.csv`              | All PC scores from the page-9 PCA (Stage 2).                             |
-| `failed_probes.csv`          | Probes failing in ≥ `failmin` fraction of samples (Stage 2).             |
-| `cell_proportions.csv`       | EpiDISH proportions (Stage 2 if `dish = TRUE`, or any time via `rundish("dir/")`). |
-| `pipeline_diagnostics.log`   | Per-step log (timestamps, parameter values, summary stats).              |
-
-There is **no** `exclude_samples.csv`, **no** `exclude_probes.csv`,
-**no** `probe_call_rates.csv` in v2.0.0. If you want a sample call-rate
-flag list, call `flagsamples()`. Probe-level masking lives in
-`mask_all.rds` and `detP_all.rds`.
-
-See [METHODS.md](METHODS.md) for the full technical reference: exact
-thresholds, the QCDP + B preprocessing order, the `frac_dt`
-vs `colMeans(detP <= 0.05)` distinction, the QC-plot algorithms, the
-`cleanmat()` order of operations, and design rationale.
-
-## `cleanmat()` in one screen
+Point it at a **parent folder** to redo all projects (multiple) within parent folder:
 
 ```r
-# Just quality mask
-betas_masked <- cleanmat(betas, mask = mask, probes = NULL)
-
-# Strict detection + k-NN imputation; consume the QC CSVs directly
-betas_strict <- cleanmat(
-  betas, mask = mask, detP = detP, pthresh = 0.01,
-  dropprobes  = "output/failed_probes.csv",
-  dropsamples = "output/flagged_samples.csv",
-  probes      = "cg", platform = "EPIC",
-  impute      = TRUE, knnk = 10)
-
-# Sex chromosome probes only
-betas_sex <- cleanmat(
-  betas, mask = mask, detP = detP,
-  probes = "sex", platform = "EPIC")
-
-# SNP probes only
-betas_snp <- cleanmat(
-  betas, probes = "snp")
+qcplots("~/projects", detp = 0.01)
 ```
 
-`probes` accepts any subset of `c("cg", "ch", "sex", "snp", "other")`,
-or `NULL` to keep all probes. `"cg"` always means autosomal CpG; sex
-chromosome cg probes live in `"sex"`.
+Everything you can change:
 
-## `rundish()` in one screen
+| Argument | Default | Accepts | Meaning |
+|---|---|---|---|
+| `detp` | `0.05` | 0–1 | detection p-value above which a probe is called failed |
+| `samplemin` | `0.95` | 0–1 | call rate below which a sample is flagged |
+| `failmin` | `0.05` | 0–1 | probe failure rate above which a probe is listed and marked |
+| `intmad` | `3` | 0–20 | MADs below the cohort median before a sample is a low-intensity outlier |
+| `intfloor` | `1300` | number or `NA` | absolute intensity floor; a **whole-cohort warning only**, `NA` disables |
+| `inclqual` | `FALSE` | `TRUE`/`FALSE` | include design-masked probes in the probe-failure panel |
 
-Single function with two calling forms — dispatches on the first
-argument's type.
+
+
+---
+
+## 3. Load masked betas for downstream work
+
+Initially, nothing is masked, allowing the user finer control. Give
+the output directory and say which masks you want — the matrices are found,
+read and combined automatically:
 
 ```r
-# In-memory: returns the proportion matrix, no I/O
-betas <- readRDS("results/PBMC/betas_all.rds")
-props <- rundish(betas, platform = "EPIC")
-
-# On-disk: writes cell_proportions.csv AND merges columns into
-# sample_sheet.csv in the same directory; returns props invisibly
-rundish("results/PBMC")
-
-# Filter to one sample-sheet cell-type label
-rundish("results", celltype = "BM")          # e.g. "BM" = B-memory
-
-# Filter to a sample ID subset
-rundish("results", samples = c("S1", "S5", "S12"))
-
-# Override reference (legacy 7-cell instead of 12-cell default)
-rundish("results/PBMC", ref = "centDHSbloodDMC.m")
-
-# Skip in the main pipeline and run standalone afterwards
-prep(dir = "results", dish = FALSE)
-rundish("results/PBMC")
-rundish("results/BM")
+b <- loadbetas("/path/to/output/directory", maskuse = "both")
 ```
 
-There is no built-in tissue allowlist. `rundish()` errors only if the
-reference's CpGs don't overlap the input matrix (< 50 probes). Caller
-chooses which cell types to deconvolve.
+| `maskuse` | Applies |
+|---|---|
+| `"both"` (default) | design mask **and** detection p-values |
+| `"detection"` | detection p-values only |
+| `"design"` | design mask only |
+| `"none"` | nothing; the stored matrix as-is |
 
-In-pipeline and standalone produce equivalent merged `sample_sheet.csv`
-files.
+Masked cells become `NA`; no probe or sample is removed. Imputation is not explicitly supported, but could be considered here.
 
-## Design
+Two further arguments, each doing exactly one thing and independent of the
+other:
 
-- **Raw matrices + masks.** Signal and QC are decoupled. Different
-  downstream analyses need different masks.
-- **Flag, don't filter.** The pipeline produces flags and a report.
-  Filtering is the user's responsibility, via `cleanmat()`.
-- **MDS on all probes, PCA on top-variable.** The page-3 MDS uses
-  every complete-case cg/ch non-sex probe; the page-9 PCA uses the
-  top `ntop` (default 100,000) by variance.
-- **No batch correction.** Analysis-specific. The page-9 panel
-  surfaces sample-sheet variables that associate with the leading
-  PCs.
+| Argument | Default | Accepts | Does |
+|---|---|---|---|
+| `values` | `"beta"` | `"beta"`, `"M"` | `"M"` returns `log2(beta / (1 - beta))`; a per-value transform, nothing else changes |
+| `samples` | `"all"` | `"all"`, `"passing"` | `"passing"` drops the columns whose `flagged` is `TRUE` in `sample_sheet.csv` |
 
-## Citation
+`flagged` is `TRUE` when any of `low_callrate`, `low_intensity`,
+`sex_mismatch` or `mds_outlier` is set. `age_outlier` does not count — it
+describes your reported metadata, not the array. For anything finer than
+"passing", read the sheet and subset on the individual flag columns:
 
-- **SeSAMe**: Zhou W, Triche TJ, Laird PW, Shen H.
-  *Nucleic Acids Research* 2018;46(20):e123.
-- **NOOB**: Triche TJ Jr, Weisenberger DJ, Van Den Berg D, Laird PW,
-  Siegmund KD. *Nucleic Acids Research* 2013;41(7):e90.
-- **Horvath clock**: Horvath S. *Genome Biology* 2013;14(10):R115.
-- **EpiDISH**: Teschendorff AE, Breeze CE, Zheng SC, Beck S.
-  *BMC Bioinformatics* 2017;18(1):105.
+```r
+ss <- read.csv("/path/to/output/directory/data/metadata/sample_sheet.csv")
+keep <- ss$sample_id[!ss$low_intensity]        # tolerate a low call rate
+b <- loadbetas("/path/to/output/directory")[, keep]
+```
+
+Example:  For EWAS-ready M-value matrix with QC failures removed:
+
+```r
+m <- loadbetas("/path/to/output/directory", values = "M", samples = "passing")
+```
+
+A **parent folder** returns one matrix per project, named by relative path:
+
+```r
+all <- loadbetas("~/projects")
+names(all)     # "cohortA/out"  "cohortB/out"  "pilot/out"
+```
+
+---
+
+## 4. Harmonise EPIC v2 to EPIC v1
+
+EPIC v2 measures some CpGs with several probes, distinguished by a suffix
+(`cg00004963_TC21`). Epigenetic clocks and cell-type reference panels key on
+bare `cg` identifiers and match nothing until those are resolved.
+
+`collapsev2()` is the single function that does this. It reduces each replicate
+group to one probe — keeping the one Peters et al. (2024) found performs best
+against matched EPIC v1 and whole-genome bisulphite data — and renames the rows
+to bare `cg` identifiers, so the result is EPIC v1 compatible in both content
+and naming. Betas, detection p-values and the design mask are collapsed
+together, so they cannot drift apart.
+
+**`pipeline()` does not do this to your stored data.** `betas_all.rds` keeps
+EPIC v2's native probe names, because collapsing discards one probe of every
+replicate pair and which one to keep is a judgement worth making deliberately.
+Stage 2 collapses transiently in memory where the clock and the EpiDISH panels
+require bare identifiers, and throws that copy away; the files on disk are
+untouched.
+
+Harmonise when you need it:
+
+```r
+b  <- loadbetas("/path/to/output/directory", maskuse = "none")
+dp <- readRDS("/path/to/output/directory/data/matrices/detP_all.rds")
+dm <- readRDS("/path/to/output/directory/data/matrices/design_mask.rds")
+
+cv <- collapsev2(b, dp, dm)
+betas <- cv$betas      # one row per CpG, bare cg identifiers
+detp  <- cv$detp       # collapsed in the same operation, so they cannot disagree
+```
+
+The Peters table is derived from the `EPICv2manifest` annotation package, which
+methylQC does not redistribute. Build it once, then reinstall:
+
+```r
+pak::pkg_install("bioc::EPICv2manifest")
+methylQC::build_epicv2_table()      # from the package source directory
+```
+
+Until then `collapsev2()` falls back to keeping the replicate with the lowest
+median detection p-value, and says so.
+
+---
+
+MIT licensed. Issues and pull requests welcome.

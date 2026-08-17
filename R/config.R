@@ -1,200 +1,244 @@
-###############################################################################
-# config.R — methylQC configuration system
-#
-# All tunable parameters stored as R options with prefix "methylQC.".
-# Column names are configurable with case-insensitive alias matching.
-#
-# Option keys are short, separator-free identifiers (see mqcdefaults()).
-###############################################################################
+## ---------------------------------------------------------------------------
+## config.R -- package-wide options.
+## ---------------------------------------------------------------------------
 
-#' Default configuration for methylQC
+.mqc_env <- new.env(parent = emptyenv())
+
+.mqc_defaults <- list(
+
+  ## ---- sample sheet column resolution ------------------------------------
+  ## Tried in order, stopping at the first tier that yields a readable table
+  ## with a recognisable identifier column. Starting strict keeps the common
+  ## case predictable -- an Illumina SampleSheet.csv sitting next to the IDATs
+  ## is found by tier 1 and nothing else is even opened -- while the later
+  ## tiers rescue lab-made sheets such as samples.BM.PH1.txt, which the 3.0.x
+  ## single pattern never matched, leaving the run with no metadata at all.
+  sheetpatterns = c(
+    "(?i)^sample.?sheet\\.(csv|xlsx?)$",                     # the canonical name
+    "(?i)^sample.?sheet.*\\.(csv|xlsx?|tsv|txt)$",           # SampleSheet_v2.csv
+    "(?i)^(samples?|targets?|pheno(type)?|manifest|annot\\w*)[._-].*\\.(csv|tsv|txt|xlsx?)$",
+    "(?i)(sample|target|pheno|manifest|annot).*\\.(csv|tsv|txt|xlsx?)$"),
+  idcol         = "Sample_Name",
+  ## Deliberately NOT File_Name/FileName: those name the IDAT file, which is
+  ## already discovered from disk, and treating them as the sample identifier
+  ## invites a sheet's file column to shadow its real sample column.
+  idaliases     = c("Sample_Name", "sample_name", "SampleName", "Sample.Name",
+                    "Sample_ID", "sample_id", "SampleID", "Sample",
+                    "Name", "ID", "Fname", "Array",
+                    "Basename", "Sentrix", "Sentrix_Barcode", "Barcode"),
+  basecol       = "Basename",
+  sexcol        = "Reported_Sex",
+  sexaliases    = c("Reported_Sex", "Sex", "sex", "gender", "Gender",
+                    "Reported_Gender"),
+  agecol        = "Age",
+  agealiases    = c("Age", "age", "age_years", "AgeYears", "Age_Years"),
+  batchcol      = "batch_folder",
+  batchaliases  = c("batch_folder", "Batch", "batch", "Plate", "plate",
+                    "Sentrix_ID", "Slide"),
+  donorcol      = "Donor",
+  donoraliases  = c("Donor", "donor", "Subject", "subject", "Patient"),
+  cellcol       = "Cell",
+  cellaliases   = c("Cell", "cell", "Cell_Type", "cell_type", "CellType",
+                    "Tissue", "tissue"),
+
+  ## ---- compute -----------------------------------------------------------
+  ## NULL means "inherit from qcplan()". Set explicitly to override.
+  workers       = NULL,
+  batch         = NULL,
+  memfrac       = 0.80,     # fraction of available RAM the run may use
+  extreme       = FALSE,    # extreme memory conservation (per-batch files)
+  savesdf       = TRUE,     # retain SigDFs; downgraded automatically if large
+
+  ## ---- detection and masking ---------------------------------------------
+  detp          = 0.05,     # ELBAR detection p-value threshold
+  maskuse       = "both",   # "both" | "detection" | "design" | "none"
+
+  ## ---- sample-level QC thresholds ----------------------------------------
+  samplemin     = 0.95,     # minimum call rate
+  intmad        = 3,        # MAD multiplier for intensity outliers
+  intfloor      = 1300,     # absolute cohort-level sanity floor (warning only)
+
+  ## ---- probe-level QC thresholds -----------------------------------------
+  failmin       = 0.05,     # probe failure rate above which a probe is listed
+  inclqual      = FALSE,    # include design-masked probes in the failure plot
+
+  ## ---- sex calling ---------------------------------------------------------
+  ## See sexcall.R. `sexsep` is the separation floor below which the cohort is
+  ## declared unimodal and NO sex is called; `sexband` is the orthogonal
+  ## distance, in within-cluster SDs, outside which a sample is "unclear".
+  sexsep        = 1.0,
+  sexband       = 5.0,
+  sexmin        = 8,        # cohort size below which sex is not called
+  ## Trim width for "high confidence female", in MADs about the low chrY
+  ## cluster's median. This does NOT set the cut-off -- the cut-off is the
+  ## midpoint of the gap above the trimmed cluster -- it only decides which
+  ## females are trusted to define that maximum, so a contaminated or XXY
+  ## sample cannot drag the boundary up behind her. Generous by design.
+  sexcutsd      = 4,
+
+  ## ---- multidimensional scaling -------------------------------------------
+  ## Distance from the cohort centroid, in SDs, beyond which a sample is
+  ## reported as an MDS outlier.
+  mdssd         = 4,
+
+  ## ---- EPICv2 replicate handling -----------------------------------------
+  ## FALSE: the stored matrices keep EPICv2's native probe names. Collapsing
+  ## is a lossy, opinionated transform, so it is an explicit call to
+  ## collapsev2() rather than something the pipeline does to your data on the
+  ## way past. Stage 2 collapses transiently, in memory, only where a
+  ## reference keyed on bare cg identifiers requires it.
+  collapse       = FALSE,
+  collapsemethod = "peters",  # "peters" | "minpval" | "mean"
+
+  ## ---- cell composition ---------------------------------------------------
+  dishref       = "blood",
+  dishmethod    = "RPC",
+
+  ## ---- SNP identity --------------------------------------------------------
+  ## Pairwise concordance is quadratic in samples. Above this cohort size only
+  ## pairs at or above `snpmin` are retained, so the output stays bounded.
+  snpmin        = 0.70,
+  snpmaxpairs   = 2e6
+)
+
+## The EpiDISH reference panels that actually exist in the installed package.
+## "breast" was listed here in 3.0.0 and maps to centBreastSub.m, which is not
+## an EpiDISH dataset, so the option silently disabled deconvolution.
+.mqc_valid <- list(
+  maskuse        = c("both", "detection", "design", "none"),
+  collapsemethod = c("peters", "minpval", "mean"),
+  dishmethod     = c("RPC", "CBS", "CP"),
+  dishref        = c("blood", "bloodsub", "epithelial", "epifibfat", "12ct")
+)
+
+#' Default methylQC options
 #'
-#' Returns the full set of tunable options. Option keys are short,
-#' separator-free identifiers. Override globally with [mqcset()] or
-#' temporarily by passing named arguments to most pipeline functions.
+#' @return a named list of the factory defaults.
+#' @export
+#' @examples
+#' mqcdefaults()$detp
+mqcdefaults <- function() .mqc_defaults
+
+#' Get current methylQC options
 #'
-#' @return A named list of defaults.
+#' @param ... optional option names; if given, only those are returned.
+#' @return a named list of the currently active options.
 #' @export
-mqcdefaults <- function() {
-  list(
-    # ---- Sample sheet discovery ----
-    sheetpattern = "sample.*\\.(csv|tsv|txt)$",
-    basecol      = "Basename",
-
-    # ---- Key column names (user-configurable with aliases) ----
-    idcol        = "sample_id",
-    idaliases    = c("sample_id", "Sample_ID", "SampleID",
-                     "Sample_Name", "Sample", "sample_name"),
-    donorcol     = "Donor",
-    donoraliases = c("Donor", "donor", "Subject", "subject",
-                     "Participant", "participant", "SubjectID",
-                     "DonorID", "ID", "donor_id", "subject_id"),
-    sexcol       = "Reported_Sex",
-    sexaliases   = c("Reported_Sex", "Sex", "gender", "Gender",
-                     "Female", "Male", "reported_sex", "sex"),
-    agecol       = "Age",
-    agealiases   = c("Age", "age", "age_years", "AgeYears",
-                     "age_at_sample", "reported_age"),
-    batchcol     = "batch_folder",
-    batchaliases = c("batch_folder", "Batch", "batch", "Plate",
-                     "plate", "Slide", "slide", "Chip", "chip",
-                     "Array_Plate", "SentrixBarcode_A"),
-    cellcol      = "Cell",
-    cellaliases  = c("Cell", "cell", "Cell_Type", "cell_type",
-                     "CellType", "Tissue", "tissue",
-                     "Tissue_Type", "tissue_type",
-                     "Sample_Type", "sample_type",
-                     "SampleType", "Source", "source"),
-
-    # ---- Processing ----
-    cores   = 1L,
-    savesdf = FALSE,
-
-    # ---- QC thresholds ----
-    # detp      : detection p-value cutoff. A probe PASSES at detP <= detp.
-    # samplemin : minimum per-sample call rate (frac_dt) before low-detection flag.
-    # intmin    : minimum per-sample mean intensity before low-intensity flag.
-    # probemin  : per-probe pass-rate used ONLY for the console "Probe breakdown"
-    #             summary. It is informational and drives no file or exclusion.
-    # failmin   : per-probe sample-FAILURE fraction at/above which a probe is
-    #             written to failed_probes.csv. The Page-2 plot draws a dashed
-    #             vertical line at this value. Default 0.10 matches meffil's
-    #             detectionp.cpgs.threshold; liberal end of the defensible
-    #             EWAS-package range (ChAMP 0%, minfi 0%, DNAmArray 5%,
-    #             meffil 10%). Appropriate when k-NN imputation is in the
-    #             downstream workflow and cohort size is large enough that
-    #             10% of samples still provides robust neighbours.
-    detp      = 0.05,
-    samplemin = 0.95,
-    intmin    = 1300,
-    probemin  = 0.95,
-    failmin   = 0.10,
-
-    # inclqual : if TRUE, quality-masked probes are kept in the probe-failure
-    #            plot/CSV. Default FALSE excludes them (they fail by design).
-    inclqual  = FALSE,
-
-    # ---- QC plots ----
-    # ntop : number of most-variable probes used for PCA (MDS uses all probes).
-    ntop = 100000L,
-
-    # ---- EpiDISH ----
-    # dishref:
-    #   Either a single reference name (string) or a named list keyed by
-    #   platform string. The default uses the Salas et al. 2022 12-cell
-    #   immune reference, which is split into platform-specific matrices:
-    #     EPIC -> cent12CT.m       (600 CpGs, 12 cell types)
-    #     450k -> cent12CT450k.m   (12-cell reference for 450k arrays)
-    #   The 12 cells are: CD4Tnv, CD4Tmem, CD8Tnv, CD8Tmem, Treg, Bnv, Bmem,
-    #   NK, Mono, Neu, Eos, Bas (Salas et al. 2022, Nat Commun).
-    #   To revert to the original 7-cell Houseman/DHS reference, set
-    #     mqcset(dishref = "centDHSbloodDMC.m")
-    #   (centDHSbloodDMC.m works for both EPIC and 450k.)
-    #
-    # There is no built-in tissue allowlist. rundish() runs whenever the
-    # caller invokes it. The probe-overlap check inside rundish() errors
-    # if the reference cannot be applied to the input matrix; this is
-    # the right gate because it's based on the data, not on a label.
-    dishref    = list(EPIC = "cent12CT.m", "450k" = "cent12CT450k.m"),
-    dishmethod = "RPC",
-
-    # ---- SeSAMe ----
-    collapse       = FALSE,
-    collapsemethod = "mean"
-  )
-}
-
-#' Get current methylQC configuration
-#' @param ... Named overrides to apply temporarily to the returned list.
-#' @return A named list of all current options.
-#' @export
+#' @examples
+#' mqcopts("detp", "maskuse")
 mqcopts <- function(...) {
-  defaults <- mqcdefaults()
-  current <- lapply(names(defaults), function(k) {
-    getOption(paste0("methylQC.", k), defaults[[k]])
-  })
-  names(current) <- names(defaults)
-  overrides <- list(...)
-  if (length(overrides)) current[names(overrides)] <- overrides
-  current
+  ## Merged with `[k] <- list(v)` rather than utils::modifyList(), because
+  ## modifyList() DELETES any element whose replacement is NULL. Several
+  ## options (workers, batch) default to NULL, so mqcset(workers = NULL) --
+  ## the restore idiom shown in mqcset()'s own example -- removed the option
+  ## from the table entirely and made mqcopts("workers") throw "unknown
+  ## option".
+  cur <- .mqc_defaults
+  ov <- as.list(.mqc_env, all.names = TRUE)
+  for (k in names(ov)) cur[k] <- list(ov[[k]])
+
+  nm <- c(...)
+  if (length(nm) == 0L) return(cur)
+  unknown <- setdiff(nm, names(cur))
+  if (length(unknown))
+    stop("unknown methylQC option(s): ", paste(unknown, collapse = ", "),
+         call. = FALSE)
+  cur[nm]
 }
 
-#' Set methylQC options globally
-#' @param ... Named options (e.g., \code{donorcol = "SubjectID"}).
-#' @return Invisibly, the previous values.
+#' Set methylQC options
+#'
+#' @param ... named options to set, e.g. \code{mqcset(detp = 0.01)}. Passing
+#'   \code{NULL} restores that option to its default.
+#' @return the previous values of the changed options, invisibly.
 #' @export
+#' @examples
+#' old <- mqcset(detp = 0.01)
+#' mqcopts("detp")$detp
+#' mqcset(detp = old$detp)
 mqcset <- function(...) {
-  overrides <- list(...)
-  if (length(overrides) == 0) return(invisible(list()))
-  if (is.null(names(overrides)) || any(names(overrides) == "")) {
-    stop("All arguments to mqcset() must be named.", call. = FALSE)
+  new <- list(...)
+  if (!length(new)) return(invisible(list()))
+  if (is.null(names(new)) || any(!nzchar(names(new))))
+    stop("all arguments to mqcset() must be named", call. = FALSE)
+
+  unknown <- setdiff(names(new), names(.mqc_defaults))
+  if (length(unknown))
+    stop("unknown methylQC option(s): ", paste(unknown, collapse = ", "),
+         ". See mqcdefaults().", call. = FALSE)
+
+  for (k in intersect(names(new), names(.mqc_valid))) {
+    v <- new[[k]]
+    if (!is.null(v) && !all(v %in% .mqc_valid[[k]]))
+      stop("option '", k, "' must be one of: ",
+           paste(.mqc_valid[[k]], collapse = ", "), call. = FALSE)
   }
-  valid <- names(mqcdefaults())
-  unknown <- setdiff(names(overrides), valid)
-  if (length(unknown)) {
-    warning("Unknown methylQC options: ", paste(unknown, collapse = ", "),
-            call. = FALSE)
-    overrides <- overrides[intersect(names(overrides), valid)]
-  }
-  if (length(overrides) == 0) return(invisible(list()))
-  prefixed <- stats::setNames(overrides, paste0("methylQC.", names(overrides)))
-  old <- do.call(options, prefixed)
+  .mqc_check_numeric(new)
+
+  old <- mqcopts()[names(new)]
+  for (k in names(new)) assign(k, new[[k]], envir = .mqc_env)
   invisible(old)
 }
 
-#' Reset all methylQC options to defaults
-#' @return Invisibly NULL.
+#' Reset methylQC options to their defaults
+#'
+#' @return \code{NULL}, invisibly.
 #' @export
+#' @examples
+#' mqcreset()
 mqcreset <- function() {
-  defaults <- mqcdefaults()
-  prefixed <- stats::setNames(vector("list", length(defaults)),
-                              paste0("methylQC.", names(defaults)))
-  do.call(options, prefixed)
+  rm(list = ls(.mqc_env, all.names = TRUE), envir = .mqc_env)
   invisible(NULL)
 }
 
-#' Resolve a column name via preferred + aliases (case-insensitive)
-#' @keywords internal
-#' @noRd
-resolve_column <- function(columns, preferred, aliases = character(0)) {
-  candidates <- unique(c(preferred, aliases))
-  for (cand in candidates) {
-    hit <- columns[tolower(columns) == tolower(cand)]
-    if (length(hit) > 0) return(hit[1])
+## Range checks for the numeric options. Catches, e.g., detp = 5 (which would
+## mask nothing) or memfrac = 8 (which would plan a run into swap).
+## `allow_na` marks the options whose documented "disable this check" value is
+## NA; without it, mqcset(intfloor = NA) was rejected while intflag()'s own
+## documentation told the user to pass it.
+.mqc_check_numeric <- function(new) {
+  chk <- function(k, lo, hi, int = FALSE, allow_na = FALSE) {
+    if (!k %in% names(new) || is.null(new[[k]])) return(invisible(NULL))
+    v <- new[[k]]
+    if (length(v) != 1L)
+      stop("option '", k, "' must be a single number", call. = FALSE)
+    ## A bare NA is logical, so the is.numeric() test has to come after the
+    ## missingness test or mqcset(intfloor = NA) -- which intflag() documents --
+    ## is rejected as "not a number".
+    if (is.na(v)) {
+      if (isTRUE(allow_na)) return(invisible(NULL))
+      stop("option '", k, "' must not be missing", call. = FALSE)
+    }
+    if (!is.numeric(v))
+      stop("option '", k, "' must be a single number", call. = FALSE)
+    if (int && v != round(v))
+      stop("option '", k, "' must be a whole number", call. = FALSE)
+    if (v < lo || v > hi)
+      stop("option '", k, "' must be between ", lo, " and ", hi, call. = FALSE)
+    invisible(NULL)
   }
-  NA_character_
+  chk("detp",        0,  1)
+  chk("samplemin",   0,  1)
+  chk("failmin",     0,  1)
+  chk("memfrac",     0.05, 0.95)
+  chk("intmad",      0,  20)
+  chk("intfloor",    0,  Inf, allow_na = TRUE)
+  chk("sexsep",      0,  Inf)
+  chk("sexcutsd",    0,  20)
+  chk("mdssd",       0,  20)
+  chk("sexband",     0,  Inf)
+  chk("sexmin",      2,  1e6, int = TRUE)
+  chk("snpmin",      0,  1)
+  chk("snpmaxpairs", 1,  Inf)
+  chk("workers",     1,  1024, int = TRUE)
+  chk("batch",       1,  1e6,  int = TRUE)
+  invisible(NULL)
 }
 
-#' Normalize sex encodings to M/F/NA
-#' @keywords internal
-#' @noRd
-normalize_sex <- function(x, col_name = "") {
-  if (is.null(x)) return(character(0))
-  result <- rep(NA_character_, length(x))
-  is_numeric_binary <- all(stats::na.omit(as.character(x)) %in% c("0", "1"))
-  lower_name <- tolower(col_name)
-  if (is_numeric_binary && grepl("female", lower_name)) {
-    result <- ifelse(x == 1, "F", ifelse(x == 0, "M", NA_character_))
-  } else if (is_numeric_binary && grepl("^male$|_male$", lower_name)) {
-    result <- ifelse(x == 1, "M", ifelse(x == 0, "F", NA_character_))
-  } else {
-    upper <- toupper(as.character(x))
-    result <- ifelse(upper %in% c("M", "MALE"), "M",
-              ifelse(upper %in% c("F", "FEMALE"), "F", NA_character_))
-  }
-  result
+## Resolve an explicit argument against the option table: an explicit non-NULL
+## argument always wins, otherwise fall back to the option.
+.opt <- function(x, name, cfg = NULL) {
+  if (!is.null(x)) return(x)
+  cfg <- cfg %||% mqcopts()
+  cfg[[name]]
 }
-
-# NOTE: there is intentionally NO .onLoad() block.
-#
-# An earlier version of this file pre-populated every option via
-# options(methylQC.* = ...) on package load. That meant any subsequent
-# change to mqcdefaults() (e.g. tightening a threshold for a new
-# methylQC release) was IGNORED for the rest of the R session, because
-# the option was already non-NULL. mqcopts() returned the stale value,
-# and the change went silently into the void.
-#
-# Without .onLoad(), session options stay NULL until the user explicitly
-# calls mqcset(). mqcopts() always reads
-#   getOption("methylQC.<key>", mqcdefaults()$<key>)
-# so unset keys cleanly fall through to the current default each call.

@@ -2,15 +2,16 @@
 % Please edit documentation in R/config.R
 \name{mqcdefaults}
 \alias{mqcdefaults}
-\title{Default configuration for methylQC}
+\title{Default methylQC options}
 \usage{
 mqcdefaults()
 }
 \value{
-A named list of defaults.
+a named list of the factory defaults.
 }
 \description{
-Returns the full set of tunable options. Option keys are short,
-separator-free identifiers. Override globally with \code{\link[=mqcset]{mqcset()}} or
-temporarily by passing named arguments to most pipeline functions.
+Default methylQC options
+}
+\examples{
+mqcdefaults()$detp
 }

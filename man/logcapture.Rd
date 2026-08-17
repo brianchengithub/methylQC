@@ -2,15 +2,25 @@
 % Please edit documentation in R/logging.R
 \name{logcapture}
 \alias{logcapture}
-\title{Append a captured object to the logger's file}
+\title{Capture output, messages and warnings from an expression into a log}
 \usage{
-logcapture(logger, obj)
+logcapture(expr, logger, stage = "capture")
 }
 \arguments{
-\item{logger}{A logger from \code{\link{makelog}}.}
+\item{expr}{expression to evaluate}
 
-\item{obj}{Any object; printed via \code{print()}.}
+\item{logger}{a logger from \code{\link{makelog}}}
+
+\item{stage}{stage label recorded against each captured line}
+}
+\value{
+the value of \code{expr}
 }
 \description{
-Append a captured object to the logger's file
+Capture output, messages and warnings from an expression into a log
+}
+\examples{
+lg <- makelog(file.path(tempdir(), "demo2.log"))
+logcapture(message("working"), lg, "demo")
+lg$close()
 }

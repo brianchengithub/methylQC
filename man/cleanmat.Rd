@@ -2,113 +2,41 @@
 % Please edit documentation in R/masking.R
 \name{cleanmat}
 \alias{cleanmat}
-\title{Apply QC decisions to a matrix}
+\title{Apply a masking policy to a beta matrix}
 \usage{
 cleanmat(
-  mat,
-  mask = NULL,
-  detP = NULL,
+  betas,
+  detp = NULL,
+  design = NULL,
+  maskuse = NULL,
   pthresh = NULL,
-  dropprobes = NULL,
-  dropsamples = NULL,
-  probes = c("cg", "ch"),
-  platform = NULL,
-  impute = FALSE,
-  knnk = 10L,
-  chunk = 50000L
+  logger = NULL
 )
 }
 \arguments{
-\item{mat}{Numeric matrix (probes x samples).}
+\item{betas}{probes-by-samples numeric matrix (unmasked, as stored).}
 
-\item{mask}{Logical matrix. TRUE = failed quality mask or detection.
-Matching values are set to NA. NULL to skip.}
+\item{detp}{matching detection p-value matrix, or \code{NULL}.}
 
-\item{detP}{Numeric matrix of detection p-values. Values with
-\code{detP > pthresh} are set to NA. NULL to skip.}
+\item{design}{named logical design mask, or \code{NULL}.}
 
-\item{pthresh}{Detection p-value cutoff. Default: \code{mqcopts()$detp}
-(0.05). A probe value is kept where \code{detP <= pthresh}.}
+\item{maskuse}{which masks to apply: \code{"both"}, \code{"detection"},
+\code{"design"} or \code{"none"}.}
 
-\item{dropprobes}{Probes to drop (rows). One of:
-\itemize{
-\item \code{NULL}: drop no probes by ID.
-\item Character vector of probe IDs.
-\item Path to a CSV file. The function looks for a \code{probe_id}
-column; if absent, uses the first column. This is the form
-that consumes methylQC's own \code{failed_probes.csv}.
-}}
+\item{pthresh}{detection p-value threshold.}
 
-\item{dropsamples}{Samples to drop (columns). Same NULL/vector/path
-convention as \code{dropprobes}, with \code{sample_id} as the
-preferred column. Consumes \code{flagged_samples.csv}.}
-
-\item{probes}{Character vector of probe categories to KEEP. Any
-combination of \code{"cg"} (autosomal CpG), \code{"ch"} (non-CpG),
-\code{"sex"} (chrX/chrY probes), \code{"snp"} (rs probes), and
-\code{"other"}. Default \code{c("cg", "ch")}. \code{NULL} keeps every
-probe (no category filtering).}
-
-\item{platform}{Platform string (e.g. \code{"EPIC"}). Required when
-\code{probes} contains \code{"cg"} or \code{"sex"}, because sex-
-chromosome probes must be identified from the manifest.}
-
-\item{impute}{Logical; if TRUE, impute remaining NAs via chunked k-NN
-after all masking/filtering. Default FALSE.}
-
-\item{knnk}{Number of nearest neighbours (default 10).}
-
-\item{chunk}{Probes per imputation block (default 50000).}
+\item{logger}{optional logger.}
 }
 \value{
-Filtered numeric matrix.
+\code{betas} with masked cells set to \code{NA}.
 }
 \description{
-Turns a raw beta or M-value matrix from Stage 1 into an analysis-ready
-matrix by (in order): applying the quality + detection masks; dropping
-user-specified samples; dropping user-specified probes; keeping only
-the requested probe categories; and optionally imputing the remaining
-NAs by chunked k-NN.
-}
-\details{
-Probe-level masking is driven by the \code{mask} and \code{detP}
-matrices, not by probe-ID lists. Probe SELECTION beyond masking is a
-category choice via \code{probes}: the default keeps autosomal CpG
-(\code{"cg"}) and non-CpG (\code{"ch"}) probes; sex-chromosome, SNP,
-and other probes are opt-in. Drop lists (\code{dropprobes},
-\code{dropsamples}) are user-supplied — methylQC will not pick them.
+Apply a masking policy to a beta matrix
 }
 \examples{
-\dontrun{
-betas <- readRDS("results/betas_all.rds")
-mask  <- readRDS("results/mask_all.rds")
-detP  <- readRDS("results/detP_all.rds")
-
-# Standard EWAS: mask + detP, autosomal CpG + non-CpG, no exclusions
-betas_ewas <- cleanmat(betas, mask = mask, detP = detP,
-                       platform = "EPIC")
-
-# Consume the QC artifacts directly: drop probes from failed_probes.csv
-# AND drop samples from flagged_samples.csv (paths, not vectors)
-betas_clean <- cleanmat(
-  betas, mask = mask, detP = detP,
-  dropprobes  = "results/failed_probes.csv",
-  dropsamples = "results/flagged_samples.csv",
-  probes      = "cg", platform = "EPIC",
-  impute      = TRUE, knnk = 10)
-
-# Mix forms: probe IDs from a CSV, sample IDs from an in-memory vector
-ss <- read.csv("results/sample_sheet.csv")
-betas_clean <- cleanmat(
-  betas, mask = mask, detP = detP,
-  dropprobes  = "results/failed_probes.csv",
-  dropsamples = ss$sample_id[ss$flagged],
-  platform = "EPIC")
-
-# SNP probes only (identity work) — no platform needed
-betas_snp <- cleanmat(betas, probes = "snp")
-
-# Minimal: just the quality mask, keep every probe
-betas_masked <- cleanmat(betas, mask = mask, probes = NULL)
-}
+b <- matrix(runif(6), 3, 2,
+            dimnames = list(c("cg1", "cg2", "cg3"), c("s1", "s2")))
+d <- matrix(c(0.001, 0.9, 0.001, 0.001, 0.001, 0.001), 3, 2,
+            dimnames = dimnames(b))
+cleanmat(b, detp = d, maskuse = "detection")
 }

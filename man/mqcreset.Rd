@@ -2,13 +2,16 @@
 % Please edit documentation in R/config.R
 \name{mqcreset}
 \alias{mqcreset}
-\title{Reset all methylQC options to defaults}
+\title{Reset methylQC options to their defaults}
 \usage{
 mqcreset()
 }
 \value{
-Invisibly NULL.
+\code{NULL}, invisibly.
 }
 \description{
-Reset all methylQC options to defaults
+Reset methylQC options to their defaults
+}
+\examples{
+mqcreset()
 }
