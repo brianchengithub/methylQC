@@ -833,8 +833,14 @@ test_that("loadbetas finds, reads and masks a run from its path", {
   expect_equal(sum(is.na(loadbetas(d, maskuse = "design"))), 2L * 4L)
   expect_equal(sum(is.na(loadbetas(d, maskuse = "both"))), 5L * 4L)
 
-  expect_equal(ncol(loadbetas(d, dropflagged = TRUE)), 3L)
-  expect_true(all(loadbetas(d, maskuse = "none", mvals = TRUE) == 0))
+  expect_equal(ncol(loadbetas(d, samples = "passing")), 3L)
+  expect_equal(ncol(loadbetas(d, samples = "all")), 4L)
+  ## values = "M" is a pure transform: same shape, same columns, logit values.
+  mm <- loadbetas(d, maskuse = "none", values = "M")
+  expect_equal(dim(mm), dim(loadbetas(d, maskuse = "none")))
+  expect_true(all(mm == 0))                    # beta 0.5 -> M 0
+  ## The two arguments are independent.
+  expect_equal(ncol(loadbetas(d, values = "M", samples = "passing")), 3L)
 })
 
 test_that("loadbetas walks a parent and names runs by relative path", {
@@ -867,4 +873,42 @@ test_that("loadbetas refuses a mask whose input is missing, rather than skipping
   expect_error(loadbetas(d, maskuse = "detection"), "detP_all.rds")
   expect_error(loadbetas(d, maskuse = "design"), "design_mask.rds")
   expect_silent(loadbetas(d, maskuse = "none"))
+})
+
+test_that("pipeline leaves EPICv2 probe names alone by default", {
+  ## Collapsing discards one of every replicate pair; which one to keep is a
+  ## judgement the analyst makes by calling collapsev2(), not something the
+  ## pipeline does to the stored matrices on the way past.
+  expect_false(mqcdefaults()$collapse)
+
+  lines <- character(0)
+  lg <- list(log = function(stage, message, warn = FALSE) {
+    lines <<- c(lines, message); invisible(NULL) },
+    path = NA_character_, close = function() invisible(NULL))
+  ids <- c("cg1_TC21", "cg1_TC22", "cg2_BC11")
+
+  ## Default: do not collapse, and say why the suffixes are being kept.
+  expect_false(methylQC:::.decide_collapse(NULL, mqcdefaults(), ids, lg))
+  expect_true(any(grepl("collapsev2", lines)))
+
+  ## Explicit request still works, and NA still means "decide from the data".
+  expect_true(methylQC:::.decide_collapse(TRUE, mqcdefaults(), ids, lg))
+  expect_true(methylQC:::.decide_collapse(NA, mqcdefaults(), ids, lg))
+  ## Nothing to collapse on a non-EPICv2 array.
+  expect_false(methylQC:::.decide_collapse(TRUE, mqcdefaults(),
+                                           c("cg1", "cg2"), lg))
+})
+
+test_that("the transient collapse picks the same replicate collapsev2 would", {
+  ## Stage 2 must not fall back to whichever row match() hits first.
+  ids <- c("cg1_TC21", "cg1_TC22", "cg2_BC11")
+  b <- matrix(c(0.1, 0.9, 0.5, 0.2, 0.8, 0.6), 3, 2,
+              dimnames = list(ids, c("s1", "s2")))
+  d <- matrix(c(0.4, 0.001, 0.001, 0.4, 0.001, 0.001), 3, 2,
+              dimnames = dimnames(b))
+  ## cg1_TC22 has the lower median p-value here, so it must win -- the opposite
+  ## of the first-row-wins answer.
+  cv <- collapsev2(b, d, method = "minpval")
+  expect_equal(unname(cv$betas["cg1", "s1"]), 0.9)
+  expect_equal(rownames(cv$betas), c("cg1", "cg2"))
 })

@@ -148,6 +148,12 @@ qc <- function(indir, outdir, platform = NULL, sheet = NULL,
                   extreme = extreme, savesdf = savesdf, memcap = parentcap,
                   logger = lg)
 
+  ## EPICv2 replicate collapsing is NOT automatic. The stored matrices keep the
+  ## array's native probe names, because collapsing discards one of every
+  ## replicate pair and which one to keep is a judgement the analyst should
+  ## make deliberately, by calling collapsev2(). Stage 2 collapses transiently
+  ## where a reference panel or clock needs bare cg identifiers, and throws the
+  ## result away afterwards.
   n_pre <- length(s1$probe_ids)
   collapsed <- FALSE
   do_collapse <- .decide_collapse(collapse, cfg, s1$probe_ids, lg)
@@ -302,13 +308,33 @@ prep <- function(dir, s1 = NULL, cols = NULL, info = NULL, collapse = NULL,
                        mdsflag = mdsoutlier(mds), logger = lg)
   sex_threshold <- attr(flags, "sex_threshold")
 
+  ## ---- reference-keyed steps, on a transient collapsed matrix ------------
+  ## The Horvath clock and the EpiDISH panels key on bare cg identifiers, so on
+  ## EPICv2 they need the replicates resolved. That is done here, in memory,
+  ## with the configured method -- so the choice of replicate is the same one
+  ## collapsev2() would make, not whichever row match() happened to hit first
+  ## -- and discarded immediately. The stored matrices are untouched.
+  refb <- s1$betas
+  transient <- FALSE
+  if (has_v2_suffix(s1$probe_ids)) {
+    lg$log("prep", paste("EPICv2 suffixes present; collapsing transiently for",
+                         "the clock and cell composition. betas_all.rds is not",
+                         "modified."))
+    cvt <- collapsev2(s1$betas, s1$detp, s1$design,
+                      method = cfg$collapsemethod, logger = lg)
+    refb <- cvt$betas
+    transient <- TRUE
+    rm(cvt)
+  }
+
   ## ---- epigenetic age (no masking) ---------------------------------------
-  ages <- predictages(s1$betas, logger = lg)
+  ages <- predictages(refb, logger = lg)
   if (!is.null(ages)) flags <- .assign_cols(flags, ages, "sample_id")
 
   ## ---- cell composition ---------------------------------------------------
-  props <- rundish(s1$betas, logger = lg)
+  props <- rundish(refb, logger = lg)
   if (!is.null(props)) flags <- .assign_cols(flags, props, "sample_id")
+  if (transient) { rm(refb); gc(verbose = FALSE) }
 
   ## ---- cache -------------------------------------------------------------
   cc <- build_cache(s1, platform, pca = pca, mds = mds, density = dens)
@@ -702,7 +728,9 @@ makemat <- function(dir, what = c("betas", "detp"), write = FALSE) {
   want <- if (!is.null(collapse)) collapse else cfg$collapse
   auto <- has_v2_suffix(probe_ids)
   if (length(want) != 1L || is.na(want)) {
-    if (auto) lg$log("qc", "EPICv2 replicate suffixes detected; collapsing")
+    ## NA still means "decide from the identifiers", for anyone who wants the
+    ## old behaviour, but it is no longer the default.
+    if (auto) lg$log("qc", "collapse = NA and EPICv2 suffixes present; collapsing")
     return(auto)
   }
   if (isTRUE(want) && !auto) {
@@ -710,9 +738,10 @@ makemat <- function(dir, what = c("betas", "detp"), write = FALSE) {
     return(FALSE)
   }
   if (!isTRUE(want) && auto)
-    lg$log("qc", paste("EPICv2 replicate suffixes are present but collapse is",
-                       "disabled. Clock and cell-type references key on bare",
-                       "cg identifiers and will not match."), warn = TRUE)
+    lg$log("qc", paste("EPICv2 replicate suffixes detected. The stored matrices",
+                       "keep them; Stage 2 collapses transiently for the clock",
+                       "and cell composition only. Call collapsev2() when you",
+                       "want a harmonised matrix of your own."))
   isTRUE(want)
 }
 

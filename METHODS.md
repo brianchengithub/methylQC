@@ -505,9 +505,23 @@ page too, capped at six such pages.
 EPICv2 measures some CpG sites with more than one probe design, distinguished
 by a suffix (`cg00004963_TC21`). Earlier arrays have no suffix.
 
-Collapsing is automatic when suffixes are detected, because clock and
-cell-type references key on bare `cg` identifiers and match nothing
-otherwise.
+**Collapsing is not automatic, and the stored matrices keep the array's native
+probe names.** Reducing a replicate group to one probe discards a real
+measurement, and which one to keep is a judgement — the Peters recommendation,
+the brightest probe, or an average — that belongs to the analyst rather than to
+a default. `betas_all.rds`, `detP_all.rds` and `design_mask.rds` therefore
+carry suffixed EPICv2 identifiers, and `collapsev2()` is an explicit call.
+
+Two consumers do need bare identifiers, because the models they implement are
+keyed on them: the Horvath clock (section 7) and the EpiDISH reference panels.
+Stage 2 collapses **transiently** for those two, in memory, with the configured
+`collapsemethod` — so the replicate chosen is the one `collapsev2()` would
+choose, not whichever row a `match()` happened to hit first — and discards the
+result immediately. Nothing written to disk is affected, and the log says when
+this happens.
+
+Setting `collapse = TRUE` makes the collapse permanent for that run; `NA`
+restores the older behaviour of deciding from the probe identifiers.
 
 **Selection, not averaging.** Probe design affects hybridisation, so
 averaging two designs produces a value corresponding to neither EPICv1 nor

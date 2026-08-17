@@ -132,12 +132,31 @@ b <- loadbetas("/path/to/output/directory", maskuse = "both")
 | `"design"` | design mask only |
 | `"none"` | nothing; the stored matrix as-is |
 
-Masked cells become `NA`. No probe or sample is removed unless you ask:
+Masked cells become `NA`; no probe or sample is removed.
+
+Two further arguments, each doing exactly one thing and independent of the
+other:
+
+| Argument | Default | Accepts | Does |
+|---|---|---|---|
+| `values` | `"beta"` | `"beta"`, `"M"` | `"M"` returns `log2(beta / (1 - beta))`; a per-value transform, nothing else changes |
+| `samples` | `"all"` | `"all"`, `"passing"` | `"passing"` drops the columns whose `flagged` is `TRUE` in `sample_sheet.csv` |
+
+`flagged` is `TRUE` when any of `low_callrate`, `low_intensity`,
+`sex_mismatch` or `mds_outlier` is set. `age_outlier` does not count — it
+describes your reported metadata, not the array. For anything finer than
+"passing", read the sheet and subset on the individual flag columns:
 
 ```r
-m <- loadbetas("/path/to/output/directory",   # M-values, QC failures removed,
-               mvals = TRUE,                   # ready for an EWAS
-               dropflagged = TRUE)
+ss <- read.csv("/path/to/output/directory/data/metadata/sample_sheet.csv")
+keep <- ss$sample_id[!ss$low_intensity]        # tolerate a low call rate
+b <- loadbetas("/path/to/output/directory")[, keep]
+```
+
+So, an EWAS-ready M-value matrix with QC failures removed:
+
+```r
+m <- loadbetas("/path/to/output/directory", values = "M", samples = "passing")
 ```
 
 A **parent folder** returns one matrix per project, named by relative path:
@@ -162,13 +181,23 @@ to bare `cg` identifiers, so the result is EPIC v1 compatible in both content
 and naming. Betas, detection p-values and the design mask are collapsed
 together, so they cannot drift apart.
 
-**`pipeline()` already does this** whenever it sees the suffixes, so
-`betas_all.rds` from an EPIC v2 run is already harmonised and needs nothing
-further. To harmonise a matrix from elsewhere:
+**`pipeline()` does not do this to your stored data.** `betas_all.rds` keeps
+EPIC v2's native probe names, because collapsing discards one probe of every
+replicate pair and which one to keep is a judgement worth making deliberately.
+Stage 2 collapses transiently in memory where the clock and the EpiDISH panels
+require bare identifiers, and throws that copy away; the files on disk are
+untouched.
+
+Harmonise when you need it:
 
 ```r
-cv <- collapsev2(betas, detp, dm)
+b  <- loadbetas("/path/to/output/directory", maskuse = "none")
+dp <- readRDS("/path/to/output/directory/data/matrices/detP_all.rds")
+dm <- readRDS("/path/to/output/directory/data/matrices/design_mask.rds")
+
+cv <- collapsev2(b, dp, dm)
 betas <- cv$betas      # one row per CpG, bare cg identifiers
+detp  <- cv$detp       # collapsed in the same operation, so they cannot disagree
 ```
 
 The Peters table is derived from the `EPICv2manifest` annotation package, which

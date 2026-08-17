@@ -22,6 +22,15 @@
 #' detection p-values and the design mask together, and applies the masking
 #' policy given. Nothing on disk is altered.
 #'
+#' \code{values} and \code{samples} are independent of each other and of
+#' \code{maskuse}: \code{values} transforms each number, \code{samples}
+#' chooses columns, \code{maskuse} sets cells to \code{NA}. Combining them
+#' does nothing that either does not do alone.
+#'
+#' EPICv2 matrices are returned with the array's native probe names. Pass them
+#' through \code{\link{collapsev2}} if a clock or reference panel needs bare
+#' \code{cg} identifiers.
+#'
 #' \code{dir} may be a single output directory or a parent holding several. In
 #' the second case every run beneath it is loaded and a named list is returned,
 #' so a set of projects can be pulled into one analysis without naming each
@@ -32,23 +41,37 @@
 #'   \code{"design"} or \code{"none"}. Defaults to the \code{maskuse} option.
 #' @param pthresh detection p-value threshold; defaults to the \code{detp}
 #'   option.
-#' @param mvals return M-values instead of beta values.
-#' @param dropflagged drop the samples the QC report flagged. Requires the
-#'   sample sheet, so it is skipped with a warning if Stage 2 has not run.
+#' @param values \code{"beta"} (default) returns the beta values as stored;
+#'   \code{"M"} returns \code{log2(beta / (1 - beta))} with a small offset, a
+#'   pure per-value transform that changes nothing else.
+#' @param samples \code{"all"} (default) returns every sample;
+#'   \code{"passing"} drops the samples whose \code{flagged} column is
+#'   \code{TRUE} in \code{data/metadata/sample_sheet.csv}, that being
+#'   \code{TRUE} when any of \code{low_callrate}, \code{low_intensity},
+#'   \code{sex_mismatch} or \code{mds_outlier} is set. \code{age_outlier}
+#'   does not count, since it describes the reported metadata rather than array
+#'   quality. Needs the sample sheet, so it warns and keeps everything if
+#'   Stage 2 has not run. \code{"passing"} is a convenience for the common
+#'   case; for anything finer, read the sheet and subset on the individual
+#'   flag columns yourself.
 #' @param logger optional logger.
 #' @return a probes-by-samples matrix, or a named list of them when \code{dir}
 #'   holds more than one run.
 #' @export
 #' @examples
 #' \dontrun{
-#' b <- loadbetas("~/qcout")                              # design + detection
-#' b <- loadbetas("~/qcout", maskuse = "detection")
-#' m <- loadbetas("~/qcout", mvals = TRUE, dropflagged = TRUE)
-#' all <- loadbetas("~/projects")                         # every run beneath
+#' b <- loadbetas("~/qcout")                          # betas, design + detection
+#' b <- loadbetas("~/qcout", maskuse = "detection")   # detection mask only
+#' m <- loadbetas("~/qcout", values = "M")            # M-values, all samples
+#' p <- loadbetas("~/qcout", samples = "passing")     # betas, QC failures dropped
+#' all <- loadbetas("~/projects")                     # every run beneath
 #' }
-loadbetas <- function(dir, maskuse = NULL, pthresh = NULL, mvals = FALSE,
-                      dropflagged = FALSE, logger = NULL) {
+loadbetas <- function(dir, maskuse = NULL, pthresh = NULL,
+                      values = c("beta", "M"), samples = c("all", "passing"),
+                      logger = NULL) {
   logger <- logger %||% nulllog()
+  values <- match.arg(values)
+  samples <- match.arg(samples)
   dirs <- .find_outdirs(dir, key = "betas")
   many <- length(dirs) > 1L
   if (many)
@@ -57,7 +80,7 @@ loadbetas <- function(dir, maskuse = NULL, pthresh = NULL, mvals = FALSE,
   out <- lapply(seq_along(dirs), function(k) {
     d <- dirs[k]
     if (many) message(sprintf("  [%d/%d] %s", k, length(dirs), d))
-    .loadbetas_one(d, maskuse, pthresh, mvals, dropflagged, logger)
+    .loadbetas_one(d, maskuse, pthresh, values, samples, logger)
   })
   ## Name by the path relative to what the caller asked for: three projects
   ## whose output directories are all called "out" would otherwise come back
@@ -71,7 +94,7 @@ loadbetas <- function(dir, maskuse = NULL, pthresh = NULL, mvals = FALSE,
   out
 }
 
-.loadbetas_one <- function(dir, maskuse, pthresh, mvals, dropflagged, logger) {
+.loadbetas_one <- function(dir, maskuse, pthresh, values, samples, logger) {
   betas <- readRDS(mqcpath(dir, "betas"))
 
   ## The design mask and the detection matrix are optional only in the sense
@@ -92,15 +115,15 @@ loadbetas <- function(dir, maskuse = NULL, pthresh = NULL, mvals = FALSE,
   b <- cleanmat(betas, detp = detp, design = dm, maskuse = use,
                 pthresh = pthresh, logger = logger)
 
-  if (isTRUE(dropflagged)) {
+  if (identical(samples, "passing")) {
     p <- mqcpath(dir, "sheet")
     ss <- if (file.exists(p))
       tryCatch(utils::read.csv(p, stringsAsFactors = FALSE),
                error = function(e) NULL) else NULL
     if (is.null(ss) || !all(c("sample_id", "flagged") %in% names(ss))) {
-      warning("dropflagged = TRUE but ", dir, " has no sample sheet with a ",
-              "'flagged' column; run prep() first. Keeping every sample.",
-              call. = FALSE)
+      warning("samples = \"passing\" needs a sample sheet with a 'flagged' ",
+              "column, which ", dir, " does not have; run prep() first. ",
+              "Keeping every sample.", call. = FALSE)
     } else {
       drop <- as.character(ss$sample_id[isTRUE_vec(ss$flagged)])
       keep <- setdiff(colnames(b), drop)
@@ -110,6 +133,6 @@ loadbetas <- function(dir, maskuse = NULL, pthresh = NULL, mvals = FALSE,
     }
   }
 
-  if (isTRUE(mvals)) b <- mvals(b)
+  if (identical(values, "M")) b <- mvals(b)
   b
 }

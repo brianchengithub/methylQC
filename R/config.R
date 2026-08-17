@@ -82,7 +82,12 @@
   mdssd         = 4,
 
   ## ---- EPICv2 replicate handling -----------------------------------------
-  collapse       = NA,        # NA = automatic (TRUE on EPICv2)
+  ## FALSE: the stored matrices keep EPICv2's native probe names. Collapsing
+  ## is a lossy, opinionated transform, so it is an explicit call to
+  ## collapsev2() rather than something the pipeline does to your data on the
+  ## way past. Stage 2 collapses transiently, in memory, only where a
+  ## reference keyed on bare cg identifiers requires it.
+  collapse       = FALSE,
   collapsemethod = "peters",  # "peters" | "minpval" | "mean"
 
   ## ---- cell composition ---------------------------------------------------
