@@ -53,4 +53,5 @@
 #' @importFrom stats setNames
 #' @importFrom utils packageVersion
 #' @importFrom methods is
+#' @importFrom gridExtra grid.arrange
 "_PACKAGE"

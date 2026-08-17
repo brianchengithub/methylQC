@@ -100,6 +100,7 @@ sexintensity <- function(sdf) {
 #' @param band orthogonal distance, in within-cluster standard deviations,
 #'   outside which a sample is reported unclear.
 #' @param minn cohort size below which no sex is called.
+#' @param cutsd strict cut-off, in MADs above the low chrY cluster's median.
 #' @return a data.frame with \code{sample_id}, \code{inferred_sex}
 #'   (\code{"M"}/\code{"F"}/\code{NA}), \code{sex_unclear} and
 #'   \code{sex_confidence}. Attributes \code{called}, \code{reason},
@@ -110,11 +111,13 @@ sexintensity <- function(sdf) {
 #' x <- c(rnorm(10, 6000, 300), rnorm(10, 3200, 300))
 #' y <- c(rnorm(10, 800, 80), rnorm(10, 3000, 250))
 #' table(sexcall(x, y, paste0("s", 1:20))$inferred_sex)
-sexcall <- function(chrX, chrY, ids, sep = NULL, band = NULL, minn = NULL) {
+sexcall <- function(chrX, chrY, ids, sep = NULL, band = NULL, minn = NULL,
+                    cutsd = NULL) {
   cfg <- mqcopts()
   sep <- .opt(sep, "sexsep", cfg)
   band <- .opt(band, "sexband", cfg)
   minn <- .opt(minn, "sexmin", cfg)
+  cutsd <- .opt(cutsd, "sexcutsd", cfg)
 
   n <- length(ids)
   out <- data.frame(sample_id = as.character(ids),
@@ -126,6 +129,7 @@ sexcall <- function(chrX, chrY, ids, sep = NULL, band = NULL, minn = NULL) {
     attr(out, "called") <- FALSE
     attr(out, "reason") <- reason
     attr(out, "threshold") <- NA_real_
+    attr(out, "break") <- NA_real_
     attr(out, "separation") <- NA_real_
     out
   }
@@ -179,50 +183,48 @@ sexcall <- function(chrX, chrY, ids, sep = NULL, band = NULL, minn = NULL) {
             "is 3-4x), so the cohort looks single-sex and no sex was called"),
       best$ratio)))
 
-  ## ---- assign, then flag samples that fit neither cluster axis ------------
-  ## Within a sex, chrX and chrY both scale with overall array brightness, so
-  ## each cluster is a line rather than a blob. Distance from the fitted line
-  ## catches aneuploidy, contamination and mixed samples.
-  grp <- ifelse(ly > best$cut, "M", "F")
-  d <- data.frame(lx = lx, ly = ly, grp = grp, stringsAsFactors = FALSE)
-  fit <- lapply(c("F", "M"), function(g) {
-    s <- d[d$grp == g, , drop = FALSE]
-    if (nrow(s) < .MQC_SEX_MINCLUST) return(NULL)
-    tryCatch(stats::lm(ly ~ lx, data = s), error = function(e) NULL)
-  })
-  names(fit) <- c("F", "M")
+  ## ---- strict cut-off from the low cluster's own distribution ------------
+  ## The natural break locates the two clusters; the cut-off is then set from
+  ## the LOW chrY cluster alone. Samples in that cluster carry no Y chromosome,
+  ## so their chrY readings are pure background and their spread is exactly the
+  ## noise a cut-off has to clear. Calibrating on the midpoint between clusters
+  ## instead would let the cut-off drift with the male cluster's position,
+  ## which depends on how many males are present.
+  ##
+  ## NOTE ON LABELS: the low-chrY cluster is called F and the high one M. XX
+  ## carries no Y chromosome, so the cluster without Y signal is the female
+  ## one; measured on reference arrays the low cluster sits near 800 intensity
+  ## units and the high near 3000.
+  low <- ly[ly <= best$cut]
+  centre <- stats::median(low)
+  spread_low <- stats::mad(low)
+  if (!is.finite(spread_low) || spread_low <= 0) spread_low <- stats::sd(low)
+  if (!is.finite(spread_low) || spread_low <= 0)
+    return(refuse("the low chrY cluster has no measurable spread"))
 
-  ortho <- function(f) {
-    if (is.null(f)) return(rep(Inf, nrow(d)))
-    cf <- stats::coef(f)
-    abs(cf[2] * d$lx - d$ly + cf[1]) / sqrt(cf[2]^2 + 1)
-  }
-  dist <- lapply(fit, ortho)
-  sdev <- vapply(c("F", "M"), function(g) {
-    i <- which(d$grp == g)
-    if (length(i) < .MQC_SEX_MINCLUST) return(Inf)
-    s <- stats::sd(dist[[g]][i])
-    if (!is.finite(s) || s <= 0) Inf else s
-  }, numeric(1))
+  strict <- centre + cutsd * spread_low
+  ## A cut-off past the high cluster would call every sample female; fall back
+  ## to the natural break when the low cluster's own spread is that wide.
+  if (strict >= min(ly[ly > best$cut])) strict <- best$cut
 
-  lim <- band * sdev
-  fits_f <- dist$F <= lim[["F"]]
-  fits_m <- dist$M <= lim[["M"]]
-  call <- ifelse(fits_f & !fits_m, "F",
-          ifelse(fits_m & !fits_f, "M",
-          ifelse(fits_f & fits_m, grp, NA_character_)))
-
-  ## Confidence: how far the sample sits from the cut, in within-cluster SDs of
-  ## chrY. Reported so a borderline call is visible in the sample sheet.
-  spread <- max(stats::sd(ly[grp == "F"]), stats::sd(ly[grp == "M"]), na.rm = TRUE)
-  conf <- if (is.finite(spread) && spread > 0) abs(ly - best$cut) / spread else NA_real_
+  ## The cut-off is strict: every sample with usable intensity gets a call.
+  ## An earlier draft withheld a call within one MAD either side, but that
+  ## converts a strict rule back into a fuzzy one and marks a legitimate
+  ## sample unclear in most cohorts -- at n = 15 per group it withheld a
+  ## female sitting 2.04 MADs above the female median, which is an ordinary
+  ## position for a female to occupy. Distance from the line is reported as
+  ## sex_confidence instead, so a borderline call is visible without being
+  ## hidden.
+  call <- ifelse(ly > strict, "M", "F")
+  conf <- abs(ly - strict) / spread_low
 
   out$inferred_sex[ok] <- call
-  out$sex_unclear[ok] <- is.na(call)
+  out$sex_unclear[ok] <- FALSE
   out$sex_confidence[ok] <- conf
   attr(out, "called") <- TRUE
   attr(out, "reason") <- "cohort is bimodal in chrY intensity"
-  attr(out, "threshold") <- 2^best$cut
+  attr(out, "threshold") <- 2^strict
+  attr(out, "break") <- 2^best$cut
   attr(out, "separation") <- best$score
   out
 }

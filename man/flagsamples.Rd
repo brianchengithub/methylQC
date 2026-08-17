@@ -9,6 +9,7 @@ flagsamples(
   sexcol = NA_character_,
   agecol = NA_character_,
   sexinfo = NULL,
+  mdsflag = NULL,
   agesd = 3,
   logger = NULL
 )
@@ -22,6 +23,9 @@ flagsamples(
 
 \item{sexinfo}{a \code{\link{sexcall}} result, or \code{NULL} to derive one
 from the \code{sex_chrX_intensity} / \code{sex_chrY_intensity} columns.}
+
+\item{mdsflag}{named logical vector from \code{\link{mdsoutlier}}, or
+\code{NULL} when the MDS coordinates are not available.}
 
 \item{agesd}{age outlier cutoff, in cohort standard deviations.}
 

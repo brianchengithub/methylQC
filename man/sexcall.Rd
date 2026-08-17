@@ -4,7 +4,7 @@
 \alias{sexcall}
 \title{Call sex for a cohort from sex-chromosome intensity}
 \usage{
-sexcall(chrX, chrY, ids, sep = NULL, band = NULL, minn = NULL)
+sexcall(chrX, chrY, ids, sep = NULL, band = NULL, minn = NULL, cutsd = NULL)
 }
 \arguments{
 \item{chrX, chrY}{per-sample median intensities.}
@@ -17,6 +17,8 @@ sexcall(chrX, chrY, ids, sep = NULL, band = NULL, minn = NULL)
 outside which a sample is reported unclear.}
 
 \item{minn}{cohort size below which no sex is called.}
+
+\item{cutsd}{strict cut-off, in MADs above the low chrY cluster's median.}
 }
 \value{
 a data.frame with \code{sample_id}, \code{inferred_sex}

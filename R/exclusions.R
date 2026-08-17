@@ -45,6 +45,8 @@ parseage <- function(x) {
 #' @param agecol resolved age column name, or \code{NA}.
 #' @param sexinfo a \code{\link{sexcall}} result, or \code{NULL} to derive one
 #'   from the \code{sex_chrX_intensity} / \code{sex_chrY_intensity} columns.
+#' @param mdsflag named logical vector from \code{\link{mdsoutlier}}, or
+#'   \code{NULL} when the MDS coordinates are not available.
 #' @param agesd age outlier cutoff, in cohort standard deviations.
 #' @param logger optional logger.
 #' @return \code{qc} with added flag columns and a \code{flagged} /
@@ -55,7 +57,8 @@ parseage <- function(x) {
 #' flagged <- flagsamples(qc, sexcol = "Reported_Sex")
 #' }
 flagsamples <- function(qc, sexcol = NA_character_, agecol = NA_character_,
-                        sexinfo = NULL, agesd = 3, logger = NULL) {
+                        sexinfo = NULL, mdsflag = NULL, agesd = 3,
+                        logger = NULL) {
 
   logger <- logger %||% nulllog()
   out <- qc
@@ -78,6 +81,8 @@ flagsamples <- function(qc, sexcol = NA_character_, agecol = NA_character_,
     out$inferred_sex <- sexinfo$inferred_sex[m]
     out$sex_unclear <- sexinfo$sex_unclear[m]
     out$sex_confidence <- sexinfo$sex_confidence[m]
+    attr(out, "sex_threshold") <- attr(sexinfo, "threshold")
+    attr(out, "sex_break") <- attr(sexinfo, "break")
     if (!isTRUE(attr(sexinfo, "called")))
       logger$log("sex", sprintf("no sex called: %s", attr(sexinfo, "reason")),
                  warn = TRUE)
@@ -105,28 +110,88 @@ flagsamples <- function(qc, sexcol = NA_character_, agecol = NA_character_,
       out$age_outlier <- is.finite(a) & abs(a - mu) > agesd * s
   }
 
+  ## ---- MDS outlier --------------------------------------------------------
+  out$mds_outlier <- if (is.null(mdsflag)) FALSE else {
+    v <- unname(mdsflag[match(out$sample_id, names(mdsflag))])
+    v[is.na(v)] <- FALSE
+    v
+  }
+
   ## ---- combine -----------------------------------------------------------
+  ## age_outlier is reported alongside the others but does NOT set `flagged`:
+  ## it describes the reported metadata distribution, not array quality, and
+  ## excluding on it would discard perfectly good arrays from an age-skewed
+  ## cohort. It still appears in flag_reason so the listing names it.
   reasons <- list(
     low_callrate  = out$low_callrate,
     low_intensity = out$low_intensity,
-    sex_mismatch  = out$sex_mismatch)
+    sex_mismatch  = out$sex_mismatch,
+    mds_outlier   = out$mds_outlier)
   for (k in names(reasons)) reasons[[k]][is.na(reasons[[k]])] <- FALSE
+  age_r <- out$age_outlier; age_r[is.na(age_r)] <- FALSE
 
   out$flagged <- Reduce(`|`, reasons)
+  allr <- c(reasons, list(age_outlier = age_r))
   out$flag_reason <- vapply(seq_len(nrow(out)), function(i) {
-    hit <- names(reasons)[vapply(reasons, function(v) isTRUE(v[i]), logical(1))]
+    hit <- names(allr)[vapply(allr, function(v) isTRUE(v[i]), logical(1))]
     if (!length(hit)) "" else paste(hit, collapse = ";")
   }, character(1))
 
   logger$log("flags", sprintf(
-    "%d of %d sample(s) flagged (call rate %d, intensity %d, sex mismatch %d)",
+    "%d of %d sample(s) flagged (call rate %d, intensity %d, sex mismatch %d, MDS outlier %d)",
     sum(out$flagged), nrow(out), sum(reasons$low_callrate),
-    sum(reasons$low_intensity), sum(reasons$sex_mismatch)))
-  if (any(out$age_outlier, na.rm = TRUE))
+    sum(reasons$low_intensity), sum(reasons$sex_mismatch),
+    sum(reasons$mds_outlier)))
+  if (any(age_r))
     logger$log("flags", sprintf(
       "%d age outlier(s) beyond %g SD (recorded, not used to exclude)",
-      sum(out$age_outlier, na.rm = TRUE), agesd))
+      sum(age_r), agesd))
   out
+}
+
+#' List the flagged samples, by identifier and reason
+#'
+#' Printed to the console and written to the log, because a count alone does
+#' not tell you which array to go and look at.
+#'
+#' @param flags output of \code{\link{flagsamples}}.
+#' @param logger optional logger.
+#' @return the flagged rows, invisibly.
+#' @export
+#' @examples
+#' \dontrun{
+#' reportflags(flags)
+#' }
+reportflags <- function(flags, logger = NULL) {
+  logger <- logger %||% nulllog()
+  labels <- c(low_callrate = "low call rate", low_intensity = "low intensity",
+              sex_mismatch = "sex mismatch", mds_outlier = "MDS outlier",
+              age_outlier = "age outlier")
+  pretty <- function(r) {
+    if (!nzchar(r)) return("")
+    paste(labels[strsplit(r, ";", fixed = TRUE)[[1]]], collapse = ", ")
+  }
+
+  sub <- flags[isTRUE_vec(flags$flagged), , drop = FALSE]
+  if (nrow(sub)) {
+    logger$log("flags", sprintf("%d flagged sample(s):", nrow(sub)))
+    ord <- order(sub$flag_reason, sub$sample_id)
+    for (i in ord)
+      logger$log("flags", sprintf("    %-28s %s", sub$sample_id[i],
+                                  pretty(sub$flag_reason[i])))
+  } else {
+    logger$log("flags", "no samples flagged")
+  }
+
+  ## Age outliers do not set `flagged`, so name them separately rather than
+  ## letting them disappear.
+  ao <- flags[isTRUE_vec(flags$age_outlier) & !isTRUE_vec(flags$flagged), ,
+              drop = FALSE]
+  if (nrow(ao))
+    logger$log("flags", sprintf(
+      "%d age outlier(s), recorded but not flagged: %s",
+      nrow(ao), paste(ao$sample_id, collapse = ", ")))
+  invisible(sub)
 }
 
 #' Samples that passed every check

@@ -61,12 +61,12 @@ floor kept as a whole-cohort warning, because a relative rule cannot notice
 that every array in the run is bad.
 
 **Sex calling.** From sex-chromosome intensity, using the package's own
-cohort-relative caller rather than an external one. It splits the cohort on
-chrY intensity at the point of greatest separation and accepts the split only
-when the two groups are genuinely separated. When they are not — a single-sex
-cohort, a tiny one, a noisy one — it reports no sex and no mismatches instead
-of inventing a split. Samples that fit neither cluster are marked unclear
-rather than forced into the nearer one.
+cohort-relative caller rather than an external one. It finds the natural break
+in chrY intensity, then sets a strict cut-off four MADs above the median of the
+*low* cluster — the samples with no Y chromosome, whose spread is pure
+background. The split is accepted only when the two groups are genuinely
+separated; when they are not — a single-sex cohort, a tiny one, a noisy one —
+it reports no sex and no mismatches rather than inventing a split.
 
 **Epigenetic age.** Horvath (2013) 353-probe clock, with the coefficients
 bundled in the package so results do not move when an annotation package
@@ -83,6 +83,12 @@ swaps and confirm repeated measurements come from the same donor.
 detected, keeping the probe recommended by Peters et al. (2024). Betas,
 p-values and the design mask collapse together in one operation, so they cannot
 drift apart.
+
+**The report reads as one document.** Every per-sample panel — call rate,
+intensity, probe failure, density, sex, age, MDS, PCs — carries the same flag
+colouring, so a sample flagged on the first panel is identifiable on all the
+others. Flagged sample IDs and their reasons are printed to the console and the
+log, not just counted.
 
 **It tells you what it did.** `METHODS.txt` is written into every output
 directory in the register of a journal Methods section, with the run's real
@@ -188,8 +194,9 @@ qcplots("~/qcout", detp = 0.01)                  # do it
 qcplots("~/qcout", detp = 0.01, suffix = "d01")  # side by side, nothing overwritten
 ```
 
-PCA, MDS and the beta density panels are frozen — their inputs do not depend on
-any tunable threshold — so a retune is typically sub-second. Call rates come
+Only the PCA and MDS *coordinates* are frozen — their input probe set does not
+depend on any tunable threshold — so every panel is redrawn and a retune is
+typically sub-second. Call rates come
 from a cached per-sample p-value histogram and probe failure rates from cached
 grid counts; only an off-grid threshold reopens a matrix file. Without
 `suffix`, the sample sheet is rewritten to match so the PDF and the CSV cannot
@@ -265,8 +272,9 @@ mqcreset()                   # revert
 | `intfloor` | `1300` | absolute floor, cohort-level **warning only**; `NA` disables |
 | `failmin` | `0.10` | probe failure rate above which a probe is listed |
 | `sexsep` | `1.0` | chrY separation floor below which no sex is called |
-| `sexband` | `5.0` | distance from a cluster axis, in SDs, beyond which a sample is unclear |
+| `sexcutsd` | `4` | strict cut-off, in MADs above the low chrY cluster's median |
 | `sexmin` | `8` | cohort size below which no sex is called |
+| `mdssd` | `4` | distance from the MDS centroid, in SDs, beyond which a sample is an outlier |
 | `workers` / `batch` | `NULL` | inherited from `qcplan()` |
 | `memfrac` | `0.80` | fraction of available RAM the run may use |
 | `savesdf` | `TRUE` | retain SigDFs; withdrawn automatically if too large |

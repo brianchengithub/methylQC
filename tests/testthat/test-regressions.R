@@ -385,3 +385,98 @@ test_that("the assembled statistics row matches the template exactly", {
                     "sex_chrX_intensity", "sex_chrY_intensity") %in% names(tmpl)))
   expect_equal(sum(duplicated(names(tmpl))), 0L)
 })
+
+test_that("the sex cut-off is derived from the low chrY cluster, not the midpoint", {
+  set.seed(11)
+  n <- 20
+  x <- c(rnorm(n, 6000, 300), rnorm(n, 3200, 300))
+  y <- c(rnorm(n, 800, 80), rnorm(n, 3000, 250))
+  r <- sexcall(x, y, paste0("s", seq_len(2 * n)))
+  expect_true(attr(r, "called"))
+
+  ## The strict cut-off sits just above the female cluster, well below the
+  ## natural break, because it is calibrated on that cluster's own spread.
+  low <- y[y < 1500]
+  expect_gt(attr(r, "threshold"), stats::median(low))
+  expect_lt(attr(r, "threshold"), attr(r, "break"))
+  expect_lt(attr(r, "threshold"), min(y[y > 1500]))
+  expect_equal(sum(r$inferred_sex == "M", na.rm = TRUE), n)
+})
+
+test_that("mdsoutlier finds a distant sample and reports the radius", {
+  m <- cbind(MDS1 = c(rnorm(20, 0, 1), 40), MDS2 = c(rnorm(20, 0, 1), 40))
+  rownames(m) <- paste0("s", seq_len(21))
+  o <- mdsoutlier(m, nsd = 4)
+  expect_true(o[["s21"]])
+  expect_equal(sum(o), 1L)
+  expect_true(is.finite(attr(o, "radius")))
+  expect_length(attr(o, "centre"), 2L)
+
+  ## A tight cohort with no outlier flags nothing.
+  m2 <- cbind(MDS1 = rnorm(30), MDS2 = rnorm(30))
+  rownames(m2) <- paste0("t", seq_len(30))
+  expect_lte(sum(mdsoutlier(m2, nsd = 4)), 1L)
+})
+
+test_that("the MDS outlier reaches the flags and the reason string", {
+  qc <- data.frame(sample_id = paste0("s", 1:6), low_callrate = FALSE,
+                   low_intensity = FALSE, mean_intensity_raw = 4000,
+                   stringsAsFactors = FALSE)
+  mf <- stats::setNames(c(rep(FALSE, 5), TRUE), qc$sample_id)
+  fl <- flagsamples(qc, mdsflag = mf)
+  expect_true(fl$mds_outlier[6])
+  expect_true(fl$flagged[6])
+  expect_match(fl$flag_reason[6], "mds_outlier")
+  expect_false(any(fl$flagged[1:5]))
+})
+
+test_that("reportflags names each flagged sample and its reason", {
+  qc <- data.frame(sample_id = c("good", "bad1", "bad2"),
+                   low_callrate = c(FALSE, TRUE, FALSE),
+                   low_intensity = c(FALSE, FALSE, TRUE),
+                   mean_intensity_raw = c(4000, 4000, 300),
+                   stringsAsFactors = FALSE)
+  fl <- flagsamples(qc)
+  lines <- character(0)
+  lg <- list(log = function(stage, message, warn = FALSE) {
+    lines <<- c(lines, message); invisible(NULL) },
+    path = NA_character_, close = function() invisible(NULL))
+  sub <- reportflags(fl, lg)
+  expect_equal(nrow(sub), 2L)
+  expect_true(any(grepl("bad1", lines)))
+  expect_true(any(grepl("bad2", lines)))
+  expect_true(any(grepl("low call rate", lines)))
+  expect_true(any(grepl("low intensity", lines)))
+  expect_false(any(grepl("good", lines)))
+})
+
+test_that("the PC/metadata panel ignores methylQC's own flag columns", {
+  set.seed(12)
+  sc <- matrix(rnorm(40 * 6), 40, 6,
+               dimnames = list(paste0("s", 1:40), paste0("PC", 1:6)))
+  plate <- rep(c("P1", "P2"), each = 20)
+  sc[, 1] <- sc[, 1] + (plate == "P2") * 8      # PC1 tracks plate
+
+  meta <- data.frame(Plate = plate,
+                     flagged = rep(c(TRUE, FALSE), 20),
+                     mds_outlier = rep(c(TRUE, FALSE), 20),
+                     stringsAsFactors = FALSE)
+  ## The helper itself is content-blind; the caller is what excludes derived
+  ## columns, so assert the exclusion list covers them.
+  expect_true(all(c("flagged", "mds_outlier", "low_callrate", "sex_mismatch") %in%
+                    methylQC:::.MQC_DERIVED_COLS))
+
+  a <- methylQC:::.pcassoc(sc, meta["Plate"], npc = 2L)
+  expect_equal(a$variable[a$pc == 1][1], "Plate")
+  expect_gt(a$eta2[a$pc == 1][1], 0.8)
+})
+
+test_that("flag categories combine the two sample-level flags", {
+  qc <- data.frame(sample_id = paste0("s", 1:4),
+                   low_callrate = c(FALSE, TRUE, FALSE, TRUE),
+                   low_intensity = c(FALSE, FALSE, TRUE, TRUE),
+                   stringsAsFactors = FALSE)
+  expect_equal(as.character(methylQC:::.flagcat(qc)),
+               c("pass", "low call rate", "low intensity",
+                 "call rate + intensity"))
+})

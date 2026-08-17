@@ -284,17 +284,9 @@ prep <- function(dir, s1 = NULL, cols = NULL, info = NULL, collapse = NULL,
   ## flagsamples() first would leave reported sex and age as NA and make
   ## sex_mismatch silently always FALSE.
   qcm <- .carry_meta(qcm, ss, cols)
-  flags <- flagsamples(qcm, sexcol = cols$sex, agecol = cols$age, logger = lg)
-
-  ## ---- epigenetic age (no masking) ---------------------------------------
-  ages <- predictages(s1$betas, logger = lg)
-  if (!is.null(ages)) flags <- .assign_cols(flags, ages, "sample_id")
-
-  ## ---- cell composition ---------------------------------------------------
-  props <- rundish(s1$betas, logger = lg)
-  if (!is.null(props)) flags <- .assign_cols(flags, props, "sample_id")
 
   ## ---- frozen panels -----------------------------------------------------
+  ## Computed BEFORE flagging, because the MDS outlier is one of the flags.
   sexp <- if (!is.na(platform)) sexprobes(platform, lg) else character(0)
   ## The matrix may have been collapsed to bare identifiers while sexprobes()
   ## returns whatever the manifest carries, so align the two before use.
@@ -306,9 +298,22 @@ prep <- function(dir, s1 = NULL, cols = NULL, info = NULL, collapse = NULL,
   dens <- betadensity(s1$betas)
   rm(bt); gc(verbose = FALSE)
 
+  flags <- flagsamples(qcm, sexcol = cols$sex, agecol = cols$age,
+                       mdsflag = mdsoutlier(mds), logger = lg)
+  sex_threshold <- attr(flags, "sex_threshold")
+
+  ## ---- epigenetic age (no masking) ---------------------------------------
+  ages <- predictages(s1$betas, logger = lg)
+  if (!is.null(ages)) flags <- .assign_cols(flags, ages, "sample_id")
+
+  ## ---- cell composition ---------------------------------------------------
+  props <- rundish(s1$betas, logger = lg)
+  if (!is.null(props)) flags <- .assign_cols(flags, props, "sample_id")
+
   ## ---- cache -------------------------------------------------------------
   cc <- build_cache(s1, platform, pca = pca, mds = mds, density = dens)
   cc$design <- s1$design
+  cc$sex_threshold <- sex_threshold
   save_rds_atomic(cc, mqcpath(dir, "cache", create = TRUE))
 
   ## ---- SNP identity ------------------------------------------------------
@@ -332,6 +337,7 @@ prep <- function(dir, s1 = NULL, cols = NULL, info = NULL, collapse = NULL,
   info <- .extend_info(info, ss, flags, pca, props, ages, cfg, platform)
   save_rds_atomic(info, mqcpath(dir, "runinfo", create = TRUE))
   writemethods(dir, info)
+  reportflags(flags, lg)
   lg$log("prep", "Stage 2 complete")
   invisible(dir)
 }
@@ -415,7 +421,8 @@ qcplots <- function(dir, detp = NULL, samplemin = NULL, failmin = NULL,
                    pthresh = cfg$detp, samplemin = cfg$samplemin,
                    intmad = cfg$intmad, intfloor = cfg$intfloor, logger = lg)
   qcm <- .carry_meta(qcm, ss, cols)
-  flags <- flagsamples(qcm, sexcol = cols$sex, agecol = cols$age, logger = lg)
+  flags <- flagsamples(qcm, sexcol = cols$sex, agecol = cols$age,
+                       mdsflag = mdsoutlier(cc$mds), logger = lg)
   keep <- setdiff(names(ss), names(flags))
   for (k in keep) flags[[k]] <- ss[[k]][match(flags$sample_id, ss$sample_id)]
 
@@ -442,6 +449,7 @@ qcplots <- function(dir, detp = NULL, samplemin = NULL, failmin = NULL,
            tag(mqcpath(dir, "failedprobe", create = TRUE), ".csv"),
            tag(mqcpath(dir, "pcscores"), ".csv"), cfg = cfg, logger = lg)
 
+  reportflags(flags, lg)
   if (is.null(suffix)) {
     ss <- .assign_cols(ss, flags, "sample_id")
     write_csv_atomic(ss, mqcpath(dir, "sheet"))
@@ -664,6 +672,7 @@ makemat <- function(dir, what = c("betas", "detp"), write = FALSE) {
     add("      low call rate         : %s", f("low_callrate"))
     add("      low intensity         : %s", f("low_intensity"))
     add("      sex mismatch          : %s", f("sex_mismatch"))
+    add("      MDS outlier           : %s", f("mds_outlier"))
     if (isFALSE(info$sex_called))
       add("      (no sex was called: cohort is not bimodal in chrY intensity)")
   }
