@@ -321,6 +321,7 @@ runsesame <- function(ss, platform, outdir,
   bpp <- .make_bpparam(workers)
   done <- 0L
   aborted <- FALSE
+  warned_mem <- FALSE
 
   for (ci in seq_along(chunks)) {
     idx <- chunks[[ci]]
@@ -354,11 +355,29 @@ runsesame <- function(ss, platform, outdir,
     ## subtracts the worker allowance before handing it over, because procmem()
     ## can only see this process. Comparing parent RSS against the whole-run
     ## budget would let the fleet's memory grow unseen.
+    ## Crossing the cap is a trigger to LOOK, not a reason to stop. Resident
+    ## memory includes R's high-water mark and pages freed but not returned to
+    ## the OS, so it drifts up even when live data is flat, and the cap is
+    ## necessarily an estimate. Abort only when the growth actually extrapolates
+    ## past the cap for the full cohort. 3.0.1 aborted on the instantaneous
+    ## reading and killed runs whose own projection showed a zero shortfall.
     if (!is.null(memcap) && is.finite(memcap) && !is.na(rss) && rss > memcap) {
-      .memory_abort(mem_track, n, memcap, outdir, betas, detp, design,
-                    probe_ids, ss, stats_l, failed, logger)
-      aborted <- TRUE
-      break
+      proj <- .project_mem(mem_track, n)
+      if (is.finite(proj) && proj <= memcap) {
+        if (!warned_mem) {
+          logger$log("memory", sprintf(
+            paste("resident memory %s is over the cap of %s, but growth",
+                  "projects to %s for all %d samples, which still fits;",
+                  "continuing"),
+            fmtbytes(rss), fmtbytes(memcap), fmtbytes(proj), n), warn = TRUE)
+          warned_mem <- TRUE
+        }
+      } else {
+        .memory_abort(mem_track, n, memcap, outdir, betas, detp, design,
+                      probe_ids, ss, stats_l, failed, logger)
+        aborted <- TRUE
+        break
+      }
     }
   }
   .stop_bpparam(bpp)
@@ -503,6 +522,22 @@ stats_raw_template <- function() {
   save_rds_atomic(bm, file.path(d, sprintf("betas_%04d.rds", ci)))
   save_rds_atomic(pm, file.path(d, sprintf("detP_%04d.rds", ci)))
   invisible(NULL)
+}
+
+## Extrapolate resident memory to the full cohort. Memory grows linearly in
+## samples because the accumulating matrices and SigDF list do, so a straight
+## line through the completed batches gives bytes per sample as the slope and
+## fixed overhead as the intercept.
+.project_mem <- function(mem_track, n) {
+  mt <- mem_track[!is.na(mem_track$rss), , drop = FALSE]
+  if (nrow(mt) >= 3L) {
+    fit <- stats::lm(rss ~ done, data = mt)
+    cf <- stats::coef(fit)
+    return(unname(cf[1] + cf[2] * n))
+  }
+  if (nrow(mt) >= 1L)
+    return(mt$rss[nrow(mt)] / mt$done[nrow(mt)] * n)
+  NA_real_
 }
 
 ## Warn, checkpoint, extrapolate. A relative memory model is fitted across

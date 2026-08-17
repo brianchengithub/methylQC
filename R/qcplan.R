@@ -33,6 +33,25 @@
 #' @noRd
 sigdfbytes <- function(n_probes) as.numeric(n_probes) * .MQC_SIGDF_BYTES_PER_PROBE
 
+#' Private memory one forked worker actually adds
+#'
+#' A worker holds its in-flight SigDF plus the beta and p-value vectors it is
+#' about to return, for each sample in its task, and a similar amount again in
+#' transient allocation. It does NOT privately hold the manifest and annotation
+#' -- those are inherited copy-on-write from the parent and never written to --
+#' which is why the parent's measured per-sample heap high-water is the wrong
+#' figure to multiply by the worker count.
+#'
+#' @param n_probes probes on the array.
+#' @param batch samples per task.
+#' @return bytes per worker.
+#' @keywords internal
+#' @noRd
+.worker_marginal <- function(n_probes, batch) {
+  per_sample <- .MQC_SIGDF_BYTES_PER_PROBE + 8 + 8      # SigDF + betas + pvals
+  as.numeric(n_probes) * max(1L, as.integer(batch)) * per_sample * 2  # x2 slack
+}
+
 #' Preflight a methylQC run
 #'
 #' Measures the actual per-sample memory cost on this machine with this array,
@@ -172,7 +191,16 @@ qcplan <- function(indir = NULL, ss = NULL, platform = NULL,
 
   ## The guard inside runsesame() can only see this process, so it is given the
   ## budget with the worker allowance already removed.
-  parentcap <- if (is.na(budget)) NA_real_ else budget - workers * per_sample
+  ##
+  ## That allowance is the worker's MARGINAL cost, not per_sample. per_sample is
+  ## the whole R heap high-water while processing one array, most of which is
+  ## the sesame manifest and annotation -- pages a forked worker shares
+  ## copy-on-write rather than duplicating. Subtracting workers * per_sample
+  ## charged the parent for ~10x the memory the fleet privately allocates and
+  ## left it a budget barely above its own steady state, so 3.0.1 aborted runs
+  ## that fit with room to spare.
+  parentcap <- if (is.na(budget)) NA_real_ else
+    max(parent_bytes * 1.25, budget - workers * .worker_marginal(np, batch))
 
   plan <- list(
     platform = platform, n_samples = n, n_probes = np,

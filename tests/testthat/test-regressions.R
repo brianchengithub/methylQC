@@ -171,3 +171,24 @@ test_that("betadensity does not disturb the caller's random stream", {
   invisible(methylQC:::betadensity(b))
   expect_equal(runif(3), want)
 })
+
+test_that("the memory guard extrapolates before aborting", {
+  ## 3.0.1 aborted on the instantaneous RSS reading. A run whose own projection
+  ## showed a zero shortfall was killed at 32 of 68 samples with 14 GiB free.
+  f <- methylQC:::.project_mem
+  ## 4.1 GiB fixed + 26 MiB/sample, measured over the first 16 batches
+  track <- data.frame(done = seq(2, 32, by = 2),
+                      rss = 4.1 * 2^30 + seq(2, 32, by = 2) * 26 * 2^20)
+  proj <- f(track, 68)
+  expect_equal(proj / 2^30, 4.1 + 68 * 26 / 1024, tolerance = 1e-6)
+  expect_lt(proj, 6.0 * 2^30)          # projection fits; must not abort
+})
+
+test_that("the worker allowance is marginal, not the whole parent heap", {
+  ## Subtracting workers * per_sample (the parent's heap high-water, mostly
+  ## copy-on-write manifest) left the parent a budget below its own steady
+  ## state.
+  w <- methylQC:::.worker_marginal(866553L, 2L)
+  expect_gt(w, 100 * 2^20)             # not trivially small
+  expect_lt(w, 400 * 2^20)             # and nowhere near the 1.5 GiB heap peak
+})
