@@ -62,11 +62,12 @@ that every array in the run is bad.
 
 **Sex calling.** From sex-chromosome intensity, using the package's own
 cohort-relative caller rather than an external one. It finds the natural break
-in chrY intensity, then sets a strict cut-off four MADs above the median of the
-*low* cluster — the samples with no Y chromosome, whose spread is pure
-background. The split is accepted only when the two groups are genuinely
-separated; when they are not — a single-sex cohort, a tiny one, a noisy one —
-it reports no sex and no mismatches rather than inventing a split.
+in chrY intensity, then places a hard cut-off halfway between the highest
+high-confidence female and the next reading above her — both terms from your
+own data, so no distributional assumption is made. Every sample gets a call;
+there is no ambiguous band. The split is accepted only when the two groups are
+genuinely separated, so a single-sex, tiny or noisy cohort reports no sex and
+no mismatches rather than having a split invented for it.
 
 **Epigenetic age.** Horvath (2013) 353-probe clock, with the coefficients
 bundled in the package so results do not move when an annotation package
@@ -152,6 +153,11 @@ it parses as a table *and* has a column that looks like a sample identifier, so
 casting a wide net does not drag in unrelated text files. The delimiter is
 inferred from the header rather than assumed, and an Illumina `[Data]` preamble
 is skipped.
+
+`sentrix_slide`, `sentrix_row` and `sentrix_col` are parsed from the barcode
+automatically (`200607130026_R06C01` → slide `200607130026`, row `06`, column
+`01`) and carried into the sample sheet, so chip position is available as a
+batch variable without anyone having to record it.
 
 Columns are then resolved by name and **confirmed against their values**: a
 column called `Sex` whose entries are not sexes is rejected in favour of one
@@ -272,7 +278,7 @@ mqcreset()                   # revert
 | `intfloor` | `1300` | absolute floor, cohort-level **warning only**; `NA` disables |
 | `failmin` | `0.10` | probe failure rate above which a probe is listed |
 | `sexsep` | `1.0` | chrY separation floor below which no sex is called |
-| `sexcutsd` | `4` | strict cut-off, in MADs above the low chrY cluster's median |
+| `sexcutsd` | `4` | trim width for "high-confidence female", in MADs; selects who defines the boundary, not the boundary itself |
 | `sexmin` | `8` | cohort size below which no sex is called |
 | `mdssd` | `4` | distance from the MDS centroid, in SDs, beyond which a sample is an outlier |
 | `workers` / `batch` | `NULL` | inherited from `qcplan()` |

@@ -46,6 +46,9 @@
 ## its own, but it moves the two medians apart by only a few per cent.
 .MQC_SEX_MINRATIO <- 1.5
 
+## Smallest female cluster in which the high-confidence trim is applied.
+.MQC_SEX_TRIMMIN <- 10L
+
 #' Median sex-chromosome intensity for one sample
 #'
 #' Total (M+U, both channels) intensity summarised over the curated chrY and
@@ -100,7 +103,9 @@ sexintensity <- function(sdf) {
 #' @param band orthogonal distance, in within-cluster standard deviations,
 #'   outside which a sample is reported unclear.
 #' @param minn cohort size below which no sex is called.
-#' @param cutsd strict cut-off, in MADs above the low chrY cluster's median.
+#' @param cutsd trim width for the high-confidence female set, in MADs about
+#'   the low chrY cluster's median. It selects which females define the
+#'   boundary; it does not itself set the cut-off.
 #' @return a data.frame with \code{sample_id}, \code{inferred_sex}
 #'   (\code{"M"}/\code{"F"}/\code{NA}), \code{sex_unclear} and
 #'   \code{sex_confidence}. Attributes \code{called}, \code{reason},
@@ -183,18 +188,25 @@ sexcall <- function(chrX, chrY, ids, sep = NULL, band = NULL, minn = NULL,
             "is 3-4x), so the cohort looks single-sex and no sex was called"),
       best$ratio)))
 
-  ## ---- strict cut-off from the low cluster's own distribution ------------
-  ## The natural break locates the two clusters; the cut-off is then set from
-  ## the LOW chrY cluster alone. Samples in that cluster carry no Y chromosome,
-  ## so their chrY readings are pure background and their spread is exactly the
-  ## noise a cut-off has to clear. Calibrating on the midpoint between clusters
-  ## instead would let the cut-off drift with the male cluster's position,
-  ## which depends on how many males are present.
+  ## ---- hard cut-off at the natural break ---------------------------------
+  ## The break locates the two clusters. The low one is female: XX carries no Y
+  ## chromosome, so its chrY readings are background. Measured on reference
+  ## arrays the low cluster sits near 800 intensity units and the high near
+  ## 3000.
   ##
-  ## NOTE ON LABELS: the low-chrY cluster is called F and the high one M. XX
-  ## carries no Y chromosome, so the cluster without Y signal is the female
-  ## one; measured on reference arrays the low cluster sits near 800 intensity
-  ## units and the high near 3000.
+  ## The cut-off is then placed HALFWAY between the highest high-confidence
+  ## female and the next reading above her, which is taken to be the first
+  ## male. Both terms come from this dataset, so the cut-off is dataset
+  ## specific and needs no distributional assumption. A cut-off derived from
+  ## the female cluster's MAD instead does assume normality, and MAD is 0.674
+  ## sigma for a normal, so a k-MAD rule is really a 0.674k-sigma rule and a
+  ## genuine female crosses it from time to time.
+  ##
+  ## "High confidence" trims stragglers before taking the maximum: a female
+  ## with elevated chrY -- contamination, a mixed sample, XXY -- would
+  ## otherwise drag the cut-off up behind her and let true males through under
+  ## it. The trim is deliberately generous, so it removes only samples that sit
+  ## clearly apart from their own cluster.
   low <- ly[ly <= best$cut]
   centre <- stats::median(low)
   spread_low <- stats::mad(low)
@@ -202,29 +214,35 @@ sexcall <- function(chrX, chrY, ids, sep = NULL, band = NULL, minn = NULL,
   if (!is.finite(spread_low) || spread_low <= 0)
     return(refuse("the low chrY cluster has no measurable spread"))
 
-  strict <- centre + cutsd * spread_low
-  ## A cut-off past the high cluster would call every sample female; fall back
-  ## to the natural break when the low cluster's own spread is that wide.
-  if (strict >= min(ly[ly > best$cut])) strict <- best$cut
+  ## Trimming needs a cluster big enough for its own MAD to be stable. Below
+  ## that, trimming removes a legitimate high female often enough to cost more
+  ## than the contamination it catches.
+  hiconf <- if (length(low) >= .MQC_SEX_TRIMMIN)
+    low[low <= centre + cutsd * spread_low] else low
+  if (length(hiconf) < .MQC_SEX_MINCLUST) hiconf <- low
+  ntrim <- length(low) - length(hiconf)
 
-  ## The cut-off is strict: every sample with usable intensity gets a call.
-  ## An earlier draft withheld a call within one MAD either side, but that
-  ## converts a strict rule back into a fuzzy one and marks a legitimate
-  ## sample unclear in most cohorts -- at n = 15 per group it withheld a
-  ## female sitting 2.04 MADs above the female median, which is an ordinary
-  ## position for a female to occupy. Distance from the line is reported as
-  ## sex_confidence instead, so a borderline call is visible without being
-  ## hidden.
-  call <- ifelse(ly > strict, "M", "F")
-  conf <- abs(ly - strict) / spread_low
+  ## The first reading strictly above the high-confidence females, whether that
+  ## is a trimmed straggler or the first male.
+  above <- sorted[sorted > max(hiconf)]
+  if (!length(above)) return(refuse("no reading above the female cluster"))
+  cut <- (max(hiconf) + min(above)) / 2
+
+  ## Hard cut-off: every sample with usable intensity gets a call, with no
+  ## ambiguous band. Distance from the line, in female-cluster MADs, is
+  ## reported so a borderline call is still visible in the sample sheet.
+  call <- ifelse(ly > cut, "M", "F")
+  conf <- abs(ly - cut) / spread_low
 
   out$inferred_sex[ok] <- call
   out$sex_unclear[ok] <- FALSE
   out$sex_confidence[ok] <- conf
   attr(out, "called") <- TRUE
   attr(out, "reason") <- "cohort is bimodal in chrY intensity"
-  attr(out, "threshold") <- 2^strict
+  attr(out, "threshold") <- 2^cut
   attr(out, "break") <- 2^best$cut
   attr(out, "separation") <- best$score
+  attr(out, "n_trimmed") <- ntrim
+  attr(out, "female_median") <- 2^centre
   out
 }

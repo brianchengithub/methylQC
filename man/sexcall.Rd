@@ -18,7 +18,9 @@ outside which a sample is reported unclear.}
 
 \item{minn}{cohort size below which no sex is called.}
 
-\item{cutsd}{strict cut-off, in MADs above the low chrY cluster's median.}
+\item{cutsd}{trim width for the high-confidence female set, in MADs about
+the low chrY cluster's median. It selects which females define the
+boundary; it does not itself set the cut-off.}
 }
 \value{
 a data.frame with \code{sample_id}, \code{inferred_sex}

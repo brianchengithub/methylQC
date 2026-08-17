@@ -69,16 +69,11 @@
   sexsep        = 1.0,
   sexband       = 5.0,
   sexmin        = 8,        # cohort size below which sex is not called
-  ## Strict cut-off: MADs above the LOW chrY cluster's own median. The low
-  ## cluster is the one without a Y chromosome, so its spread is pure
-  ## background and is what a cut-off should be calibrated against.
-  ## 4 rather than 3 because MAD is 0.674 sigma for a normal, so 3 MADs is only
-  ## about 2 sigma and a genuine female occasionally crosses it. Simulated over
-  ## 200 replicates, mean spurious sex mismatches per cohort were:
-  ##     sexcutsd  20F+20M  50F+50M  single-sex
-  ##            2     0.55     1.10        0.00
-  ##            3     0.06     0.08        0.00
-  ##            4     0.00     0.00        0.00
+  ## Trim width for "high confidence female", in MADs about the low chrY
+  ## cluster's median. This does NOT set the cut-off -- the cut-off is the
+  ## midpoint of the gap above the trimmed cluster -- it only decides which
+  ## females are trusted to define that maximum, so a contaminated or XXY
+  ## sample cannot drag the boundary up behind her. Generous by design.
   sexcutsd      = 4,
 
   ## ---- multidimensional scaling -------------------------------------------

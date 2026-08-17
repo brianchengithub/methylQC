@@ -68,6 +68,20 @@ discover <- function(indir, recursive = TRUE, sheet = NULL, logger = NULL) {
 
   out$detected_platform <- .detect_platform(base, batch, logger)
 
+  ## Position on the chip, parsed from the Sentrix barcode. Slide, row and
+  ## column are the three physical variables most likely to drive a batch
+  ## effect, and they are available for free from the file name -- no sample
+  ## sheet needs to record them.
+  pos <- .sentrix_parts(sentrix)
+  for (k in names(pos)) out[[k]] <- pos[[k]]
+  known <- sum(!is.na(pos$sentrix_slide))
+  if (known)
+    logger$log("discover", sprintf(
+      "chip position parsed for %d of %d samples: %d slide(s), %d row(s), %d column(s)",
+      known, nrow(out), length(unique(stats::na.omit(pos$sentrix_slide))),
+      length(unique(stats::na.omit(pos$sentrix_row))),
+      length(unique(stats::na.omit(pos$sentrix_col)))))
+
   ## Pass the discovered identifiers in, so a candidate sheet's id column can
   ## be confirmed against what is actually on disk rather than guessed at.
   ss <- .read_sheets(indir, sheet, cfg, targets = c(sentrix, sid), logger)
@@ -76,6 +90,29 @@ discover <- function(indir, recursive = TRUE, sheet = NULL, logger = NULL) {
   logger$log("discover", sprintf("%d samples across %d batch folder(s)",
                                  nrow(out), length(unique(out$batch_folder))))
   out
+}
+
+#' Split a Sentrix barcode into slide, row and column
+#'
+#' \code{200607130026_R06C01} becomes slide \code{200607130026}, row
+#' \code{06} and column \code{01}. Identifiers that do not carry the position
+#' give \code{NA}, so a non-Illumina naming scheme costs nothing.
+#'
+#' @param ids Sentrix identifiers.
+#' @return a list of three character vectors.
+#' @keywords internal
+#' @noRd
+.sentrix_parts <- function(ids) {
+  ids <- as.character(ids)
+  grab <- function(re) {
+    v <- rep(NA_character_, length(ids))
+    hit <- grepl(re, ids, perl = TRUE)
+    v[hit] <- sub(re, "\\1", ids[hit], perl = TRUE)
+    v
+  }
+  list(sentrix_slide = grab("^([^_]+)_R[0-9]+C[0-9]+$"),
+       sentrix_row   = grab("^[^_]+_R([0-9]+)C[0-9]+$"),
+       sentrix_col   = grab("^[^_]+_R[0-9]+C([0-9]+)$"))
 }
 
 ## Platform inference, one probe per batch folder.

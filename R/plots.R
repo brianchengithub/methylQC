@@ -32,6 +32,12 @@
 ## Probes carried into the MDS distance, from the PCA input.
 .MQC_MDS_NTOP   <- 5000L
 
+## The expanded PC/metadata pages: minimum association worth a panel, panels
+## per page, and a cap so a sheet with many columns cannot bloat the report.
+.MQC_PC_MINETA    <- 0.10
+.MQC_PC_PERPAGE   <- 8L
+.MQC_PC_MAXPANELS <- 24L
+
 ## Columns methylQC itself produces. Excluded from the PC/metadata panel so a
 ## component cannot be "explained" by a flag derived from the same matrix.
 .MQC_DERIVED_COLS <- c(
@@ -41,6 +47,11 @@
   "call_rate", "detp_threshold", "intensity_cutoff", "reported_age",
   "sex_confidence", "sex_chrX_intensity", "sex_chrY_intensity",
   "mean_intensity_raw", "mean_intensity_mu", "detected_platform")
+
+## Chip position, parsed by discover() from the Sentrix barcode. Kept as
+## candidates for the PC panels: slide, row and column are the physical
+## variables most likely to carry a batch effect.
+.MQC_POSITION_COLS <- c("sentrix_slide", "sentrix_row", "sentrix_col")
 
 ## One palette, used by every per-sample panel.
 .MQC_FLAG_COLS <- c(
@@ -708,14 +719,61 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
                            if (best$eta2 < 0.10) "  (weak)" else ""),
         x = NULL, y = sprintf("PC%d", k))
   }
-  if (!length(panels)) return(invisible(NULL))
-
-  gridExtra::grid.arrange(
-    grobs = panels, ncol = 3,
-    top = "Top principal components against the metadata they track most strongly")
+  if (length(panels))
+    gridExtra::grid.arrange(
+      grobs = panels, ncol = 3,
+      top = "Top principal components against the metadata they track most strongly")
   logger$log("plots", sprintf(
     "PC/metadata panel: %s",
     paste(sprintf("PC%d~%s(eta2=%.2f)", assoc$pc[!duplicated(assoc$pc)],
                   assoc$variable[!duplicated(assoc$pc)],
                   assoc$eta2[!duplicated(assoc$pc)]), collapse = ", ")))
+
+  ## ---- the rest of the metadata, strongest associations first -------------
+  ## The grid above answers "what does each PC represent" by showing only the
+  ## single best variable per PC, which hides every other variable in the
+  ## sheet. These pages show the remaining PC/variable pairs ranked by
+  ## association, eight to a page, so a batch effect sitting on PC3 alongside a
+  ## stronger tissue effect is still visible.
+  shown <- paste(assoc$pc[!duplicated(assoc$pc)],
+                 assoc$variable[!duplicated(assoc$pc)])
+  rest <- assoc[!paste(assoc$pc, assoc$variable) %in% shown &
+                  is.finite(assoc$eta2) & assoc$eta2 >= .MQC_PC_MINETA, ,
+                drop = FALSE]
+  if (!nrow(rest)) return(invisible(NULL))
+  rest <- rest[order(-rest$eta2), , drop = FALSE]
+  rest <- utils::head(rest, .MQC_PC_MAXPANELS)
+
+  pages <- split(seq_len(nrow(rest)),
+                 ceiling(seq_len(nrow(rest)) / .MQC_PC_PERPAGE))
+  for (pi in seq_along(pages)) {
+    grobs <- lapply(pages[[pi]], function(j) {
+      r <- rest[j, ]
+      d <- data.frame(score = sc[, r$pc],
+                      grp = factor(as.character(meta[[r$variable]])),
+                      stringsAsFactors = FALSE)
+      d <- d[!is.na(d$grp), , drop = FALSE]
+      ggplot2::ggplot(d, ggplot2::aes(.data$grp, .data$score,
+                                      colour = .data$grp)) +
+        ggplot2::geom_boxplot(outlier.shape = NA, colour = "grey60",
+                              fill = NA, linewidth = 0.3) +
+        ggplot2::geom_jitter(width = 0.18, height = 0, size = 0.9, alpha = 0.8) +
+        ggplot2::guides(colour = "none") + th +
+        ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1,
+                                                           size = 6),
+                       plot.title = ggplot2::element_text(size = 9)) +
+        ggplot2::labs(
+          title = sprintf("PC%d ~ %s", r$pc, r$variable),
+          subtitle = sprintf("eta2 = %.2f%s", r$eta2,
+                             if (is.na(r$p)) "" else sprintf(", p = %.2g", r$p)),
+          x = NULL, y = sprintf("PC%d", r$pc))
+    })
+    gridExtra::grid.arrange(
+      grobs = grobs, ncol = 4,
+      top = sprintf("PC versus metadata, remaining associations (page %d of %d)",
+                    pi, length(pages)))
+  }
+  logger$log("plots", sprintf(
+    "%d further PC/metadata association(s) at eta2 >= %.2f, over %d page(s)",
+    nrow(rest), .MQC_PC_MINETA, length(pages)))
 }

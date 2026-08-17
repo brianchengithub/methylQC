@@ -386,7 +386,7 @@ test_that("the assembled statistics row matches the template exactly", {
   expect_equal(sum(duplicated(names(tmpl))), 0L)
 })
 
-test_that("the sex cut-off is derived from the low chrY cluster, not the midpoint", {
+test_that("the sex cut-off is dataset-specific, not distribution-based", {
   set.seed(11)
   n <- 20
   x <- c(rnorm(n, 6000, 300), rnorm(n, 3200, 300))
@@ -394,13 +394,14 @@ test_that("the sex cut-off is derived from the low chrY cluster, not the midpoin
   r <- sexcall(x, y, paste0("s", seq_len(2 * n)))
   expect_true(attr(r, "called"))
 
-  ## The strict cut-off sits just above the female cluster, well below the
-  ## natural break, because it is calibrated on that cluster's own spread.
-  low <- y[y < 1500]
-  expect_gt(attr(r, "threshold"), stats::median(low))
-  expect_lt(attr(r, "threshold"), attr(r, "break"))
-  expect_lt(attr(r, "threshold"), min(y[y > 1500]))
+  ## Both terms come from the data: the cut-off is the midpoint between the
+  ## highest female and the next reading above her, on the log2 scale.
+  fmax <- max(y[seq_len(n)]); mmin <- min(y[(n + 1):(2 * n)])
+  expect_equal(attr(r, "threshold"), sqrt(fmax * mmin), tolerance = 1e-6)
+  expect_gt(attr(r, "threshold"), fmax)
+  expect_lt(attr(r, "threshold"), mmin)
   expect_equal(sum(r$inferred_sex == "M", na.rm = TRUE), n)
+  expect_false(any(r$sex_unclear))
 })
 
 test_that("mdsoutlier finds a distant sample and reports the radius", {
@@ -479,4 +480,76 @@ test_that("flag categories combine the two sample-level flags", {
   expect_equal(as.character(methylQC:::.flagcat(qc)),
                c("pass", "low call rate", "low intensity",
                  "call rate + intensity"))
+})
+
+test_that("the sex cut-off is the midpoint of the gap above the female cluster", {
+  ## Constructed so the boundary is unambiguous: females at 800, males at 3000,
+  ## with the highest female at 900 and the lowest male at 2800.
+  y <- c(800, 820, 840, 860, 880, 900, 2800, 3000, 3200, 3400)
+  x <- c(rep(6000, 6), rep(3200, 4))
+  r <- sexcall(x, y, paste0("s", seq_along(y)))
+  expect_true(attr(r, "called"))
+  expect_equal(attr(r, "threshold"), sqrt(900 * 2800), tolerance = 1e-6)
+  expect_equal(r$inferred_sex, c(rep("F", 6), rep("M", 4)))
+  expect_false(any(r$sex_unclear))          # a hard cut-off, no ambiguous band
+  expect_false(any(is.na(r$inferred_sex)))
+})
+
+test_that("a female with elevated chrY does not drag the cut-off up behind her", {
+  ## The trim exists so one contaminated sample cannot let true males through.
+  set.seed(21)
+  n <- 25
+  y <- c(rnorm(n, 800, 60), rnorm(n, 3000, 250))
+  y[1] <- 1600                              # contaminated / mixed female
+  x <- c(rnorm(n, 6000, 300), rnorm(n, 3200, 300))
+  r <- sexcall(x, y, paste0("s", seq_len(2 * n)))
+  expect_true(attr(r, "called"))
+  ## Either mechanism may isolate her -- the natural break may already put her
+  ## above the females, or the trim may exclude her from defining the maximum.
+  ## What matters is the outcome: the cut-off lands below her.
+  expect_lt(attr(r, "threshold"), 1600)
+  expect_equal(r$inferred_sex[1], "M")      # so she surfaces as a mismatch
+  expect_true(all(r$inferred_sex[(n + 1):(2 * n)] == "M"))
+})
+
+test_that("PCA and MDS input excludes design-masked, low-detection and sex probes", {
+  set.seed(22)
+  np <- 600L; ns <- 12L
+  ids <- c(sprintf("cg%04d", 1:590), sprintf("rs%04d", 1:10))
+  b <- matrix(runif(np * ns), np, ns, dimnames = list(ids, paste0("s", 1:ns)))
+  d <- matrix(0.001, np, ns, dimnames = dimnames(b))
+
+  design <- stats::setNames(rep(FALSE, np), ids)
+  design[1:50] <- TRUE                      # quality-mask probes
+  d[51:100, ] <- 0.9                        # fail detection in every sample
+  sexp <- ids[101:150]                      # sex chromosome probes
+
+  bt <- pcainput(b, d, design, sexp)
+  expect_false(any(ids[1:50]   %in% rownames(bt)))   # design masked
+  expect_false(any(ids[51:100] %in% rownames(bt)))   # low detection
+  expect_false(any(sexp        %in% rownames(bt)))   # sex chromosomes
+  expect_false(any(grepl("^rs", rownames(bt))))      # not cg/ch
+
+  ## MDS is built from the same matrix, so it inherits every exclusion.
+  m <- methylQC:::runmds(bt)
+  expect_false(is.null(m))
+  expect_equal(nrow(m), ns)
+})
+
+test_that("sexprobes falls back to the bundled lists rather than returning nothing", {
+  ## Returning character(0) silently left sex chromosomes in the PCA input.
+  mqcannoreset()
+  ids <- suppressWarnings(sexprobes("NoSuchPlatform", methylQC:::nulllog()))
+  expect_gt(length(ids), 3000L)
+  expect_true(all(c(methylQC:::.sesame_chrY_clean[1],
+                    methylQC:::.sesame_chrX_xlinked[1]) %in% ids))
+  mqcannoreset()
+})
+
+test_that("Sentrix barcodes split into slide, row and column", {
+  p <- methylQC:::.sentrix_parts(c("200607130026_R06C01", "201516260020_R03C02",
+                                   "not_a_barcode", NA))
+  expect_equal(p$sentrix_slide, c("200607130026", "201516260020", NA, NA))
+  expect_equal(p$sentrix_row,   c("06", "03", NA, NA))
+  expect_equal(p$sentrix_col,   c("01", "02", NA, NA))
 })

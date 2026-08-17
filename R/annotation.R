@@ -169,13 +169,21 @@ sexprobes <- function(platform, logger = NULL) {
   ## a Suggests, so say plainly when it is absent: 3.0.0 swallowed the failure
   ## and returned character(0), which silently left every chrX and chrY probe
   ## in the PCA input while the report claimed they had been excluded.
-  if (!requireNamespace("GenomeInfoDb", quietly = TRUE)) {
-    logger$log("anno", paste(
-      "GenomeInfoDb is not installed, so sex-chromosome probes cannot be",
-      "identified and will NOT be excluded from the PCA. Install with",
-      "pak::pkg_install(\"bioc::GenomeInfoDb\")."), warn = TRUE)
-    return(character(0))
+  ## The bundled curated lists are the fallback whenever the manifest route is
+  ## unavailable. Returning character(0) instead would silently leave every
+  ## chrX and chrY probe in the PCA and MDS input while the report claimed they
+  ## had been excluded.
+  fallback <- function(why) {
+    ids <- unique(c(.sesame_chrX_xlinked, .sesame_chrY_clean))
+    logger$log("anno", sprintf(paste(
+      "%s; falling back to the %d curated sex-chromosome probes bundled with",
+      "methylQC. These cover HM450/EPIC and exclude pseudo-autosomal probes,",
+      "but are not platform-specific."), why, length(ids)), warn = TRUE)
+    assign(key, ids, envir = .anno_cache)
+    ids
   }
+  if (!requireNamespace("GenomeInfoDb", quietly = TRUE))
+    return(fallback("GenomeInfoDb is not installed"))
   ids <- tryCatch({
     mf <- sesameData::sesameData_getManifestGRanges(platform)
     chr <- as.character(GenomeInfoDb_seqnames(mf))
@@ -187,6 +195,7 @@ sexprobes <- function(platform, logger = NULL) {
     character(0)
   })
   ids <- unique(stats::na.omit(ids))
+  if (!length(ids)) return(fallback(sprintf("no sex probes found for %s", platform)))
   assign(key, ids, envir = .anno_cache)
   ids
 }

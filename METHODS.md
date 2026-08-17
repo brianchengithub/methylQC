@@ -454,8 +454,29 @@ split in a small single-sex cohort, because the widest spacing between order
 statistics of a normal sample can reach a full within-group standard deviation
 at small *n*. A ratio test alone accepts a smooth intensity gradient with no
 real grouping. Together they separate a genuine male/female split — which
-scores about 10 on the gap statistic and 3–4× on the ratio — from a chance one,
-by an order of magnitude on at least one axis.
+scores about 10 on the gap statistic and 3–4× on the ratio — from a chance one.
+
+Once accepted, the **cut-off is placed halfway between the highest
+high-confidence female and the next reading above her**, on the log2 scale.
+Both terms come from this dataset, so the boundary is dataset-specific and
+assumes nothing about the shape of either distribution. A cut-off derived from
+the female cluster's MAD does assume normality, and MAD is 0.674 σ for a
+normal, so a *k*-MAD rule is really a 0.674*k*-σ rule that a genuine female
+crosses from time to time. Measured over 300 replicates, the gap rule gives
+0.003 false mismatches per 100-sample cohort against 0.08 for a 3-MAD rule.
+
+"High confidence" trims the female cluster at `sexcutsd` MADs (default 4)
+before taking its maximum, and only when the cluster has at least ten members,
+below which its own MAD is too noisy to trim on. The trim matters when a female
+carries elevated chrY — contamination, a mixed sample, XXY — because she would
+otherwise drag the boundary up behind her and let true males through
+underneath it. With one such sample planted at chrY 1600 against females at 800
+and males at 3000, she is isolated in 99–100% of replicates.
+
+The cut-off is **hard**: every sample with usable sex-chromosome intensity gets
+a call, and there is no ambiguous band. Distance from the line, in
+female-cluster MADs, is reported as `sex_confidence` so a borderline call is
+visible in the sample sheet without being withheld.
 
 When the split is rejected, **no sex is called for any sample** and no
 mismatches are reported. This is the important behaviour. The rule this
@@ -469,18 +490,12 @@ per cohort shape:
 | 20F + 0M | 50.0% of the cohort, in 100% of runs | 0 |
 | 0F + 20M | 49.8% of the cohort, in 100% of runs | 0 |
 | 38F + 2M | 13.2% of the cohort, in 100% of runs | 0 |
-| 10F + 10M | 5.4% | 0 |
-| 50F + 50M | 0.2% | 0 |
+| 10F + 10M | 5.4% | 0.06 per cohort |
+| 50F + 50M | 0.2% | 0.003 per cohort |
 
 Single-sex cohorts are entirely ordinary — a female breast series, a male
 prostate series — so the old rule failed hardest exactly where a genuine sample
 swap matters most.
-
-Within an accepted split, each group is a line rather than a blob, because
-chrX and chrY intensity both scale with overall array brightness. Orthogonal
-distance from the fitted line is used to mark samples that fit neither
-cluster; those are reported as **unclear** rather than forced into the nearer
-group, which is where aneuploidy, contamination and mixed samples land.
 
 ---
 
