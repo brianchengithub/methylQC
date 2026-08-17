@@ -570,16 +570,20 @@ category the code had forgotten to compute would look identical.
    probes at or above `failmin` are written to `failed_probes.csv`.
 4. **Beta value density.** One curve per sample, flagged samples opaque and in
    their flag colour over a faded cohort.
-5. **EpiDISH cell-type proportions.** Stacked composition per sample, ordered
-   by whichever cell type dominates the cohort, so a sample whose composition
-   departs from the rest shows up as a break in the stack. Row sums are
+5. **EpiDISH cell-type proportions.** Stacked composition per sample, labelled
+   by sample identifier and ordered by compositional similarity, so alike
+   samples sit together and a departure reads as a break in the stack. The
+   ordering is the leaf order of an average-linkage hierarchical clustering on
+   Euclidean distance; the dendrogram itself is not drawn, since it would take
+   a third of the page to say what the ordering already says. Row sums are
    reported in the subtitle rather than forced to 1: RPC does not constrain
    them, and a row summing well below 1 means the reference panel did not
    explain that sample.
 6. **Sex chromosome intensity.** chrX against chrY, coloured by *reported* sex,
-   with the strict cut-off drawn and samples failing detection or intensity
-   ringed. Mismatches are not highlighted here — the point of the panel is to
-   show the clusters the call was made from.
+   with the cut-off drawn. Neither mismatches nor QC failures are marked here:
+   the point of the panel is to show the two clusters the call was made from,
+   and everything else on it competes with that. Mismatches are in the sample
+   sheet, in the log and in the console listing.
 7. **Reported versus epigenetic age.** With a transparent ±3 SD band about the
    fitted line.
 8. **MDS of retained probes.** With a dashed circle at `mdssd` SDs from the

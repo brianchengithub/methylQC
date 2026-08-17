@@ -794,8 +794,5 @@ makemat <- function(dir, what = c("betas", "detp"), write = FALSE) {
   add("  Methods   : %s", mqcpath(dir, "methods"))
   add("  Log       : %s", mqcpath(dir, "log"))
   add("")
-  add("  Retune a threshold without reprocessing:")
-  add("    qcplots(\"%s\", detp = 0.01)", dir)
-  add("")
   L
 }

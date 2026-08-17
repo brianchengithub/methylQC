@@ -91,13 +91,18 @@ isTRUE_vec <- function(x) {
   x
 }
 
+## limits= as well as drop=FALSE. drop=FALSE alone is enough in ggplot2 4.x,
+## but naming the limits makes the guarantee explicit and independent of how a
+## future ggplot2 treats unused factor levels.
 .scale_flag <- function(name = NULL)
   ggplot2::scale_colour_manual(values = .MQC_FLAG_COLS, name = name,
-                               drop = FALSE, na.value = "grey80")
+                               drop = FALSE, limits = names(.MQC_FLAG_COLS),
+                               na.value = "grey80")
 
 .scale_flag_fill <- function(name = NULL)
   ggplot2::scale_fill_manual(values = .MQC_FLAG_COLS, name = name,
-                             drop = FALSE, na.value = "grey80")
+                             drop = FALSE, limits = names(.MQC_FLAG_COLS),
+                             na.value = "grey80")
 
 #' Build the PCA input matrix
 #'
@@ -507,9 +512,11 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
   invisible(NULL)
 }
 
-## Stacked composition per sample. Ordered by whichever cell type dominates the
-## cohort, so a sample whose composition departs from the rest is visible as a
-## break in the stack rather than having to be hunted for.
+## Stacked composition per sample, samples ordered by similarity so that
+## compositionally alike samples sit together and a departure reads as a break
+## in the stack. The ordering comes from a hierarchical clustering of the
+## composition matrix, but the dendrogram itself is not drawn -- it would take
+## a third of the page to say what the ordering already says.
 .p_cells <- function(qc, th) {
   cols <- grep("^cell_", names(qc), value = TRUE)
   cols <- cols[vapply(cols, function(k) is.numeric(qc[[k]]), logical(1))]
@@ -519,43 +526,71 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
   keep <- stats::complete.cases(m)
   if (!any(keep)) return(invisible(NULL))
   m <- m[keep, , drop = FALSE]
-  ids <- qc$sample_id[keep]
+  ids <- as.character(qc$sample_id[keep])
   types <- sub("^cell_", "", cols)
 
   ## Row sums are reported rather than forced to 1: EpiDISH's RPC does not
   ## constrain them, and a row summing to well under 1 means the reference
   ## panel did not explain that sample.
   rs <- rowSums(m)
-  top <- types[which.max(colMeans(m))]
-  ord <- order(m[, which.max(colMeans(m))], decreasing = TRUE)
+
+  ord <- .cluster_order(m)
+  ids <- ids[ord]
+  m <- m[ord, , drop = FALSE]
 
   d <- data.frame(
-    sample = factor(rep(ids[ord], times = length(types)),
-                    levels = ids[ord]),
-    type = factor(rep(types, each = length(ord)), levels = types),
-    prop = as.vector(m[ord, , drop = FALSE]),
+    sample = factor(rep(ids, times = length(types)), levels = ids),
+    type = factor(rep(types, each = length(ids)), levels = types),
+    prop = as.vector(m),
     stringsAsFactors = FALSE)
 
   ## A fixed, reproducible qualitative palette: the same cell type gets the
   ## same colour in every report.
   pal <- stats::setNames(
     grDevices::hcl.colors(length(types), palette = "Dark 3"), types)
+  ## Shrink the sample labels as the cohort grows; past a few hundred they
+  ## cannot be rendered legibly at any size and are dropped.
+  n <- length(ids)
+  lab <- n <= 300L
+  sz <- if (n <= 60L) 5.5 else if (n <= 150L) 4 else 2.6
 
   print(ggplot2::ggplot(d, ggplot2::aes(.data$sample, .data$prop,
                                         fill = .data$type)) +
     ggplot2::geom_col(width = 1) +
     ggplot2::scale_fill_manual(values = pal, name = NULL) +
     ggplot2::scale_y_continuous(expand = c(0, 0)) + th +
-    ggplot2::theme(axis.text.x = ggplot2::element_blank(),
-                   axis.ticks.x = ggplot2::element_blank(),
-                   panel.grid.major.x = ggplot2::element_blank()) +
+    ggplot2::theme(
+      axis.text.x = if (lab)
+        ggplot2::element_text(angle = 90, hjust = 1, vjust = 0.5, size = sz)
+        else ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank()) +
     ggplot2::labs(
       title = "EpiDISH cell-type proportions",
       subtitle = sprintf(
-        "%d samples; %d cell types; sorted by %s. Row-sum median=%.3f (range %.3f-%.3f).",
-        length(ids), length(types), top,
-        stats::median(rs), min(rs), max(rs)),
+        "%d samples; %d cell types; ordered by compositional similarity. Row-sum median=%.3f (range %.3f-%.3f).%s",
+        n, length(types), stats::median(rs), min(rs), max(rs),
+        if (lab) "" else " Sample labels omitted above 300 samples."),
       x = "Sample", y = "Proportion"))
+}
+
+#' Order rows by hierarchical clustering, without drawing the dendrogram
+#'
+#' Average linkage on Euclidean distance. Falls back to the original order when
+#' there are too few rows to cluster or the distances are degenerate.
+#'
+#' @param m a numeric matrix, one row per sample.
+#' @return an integer ordering of the rows.
+#' @keywords internal
+#' @noRd
+.cluster_order <- function(m) {
+  n <- nrow(m)
+  if (n < 3L) return(seq_len(n))
+  d <- tryCatch(stats::dist(m), error = function(e) NULL)
+  if (is.null(d) || !all(is.finite(d)) || max(d) <= 0) return(seq_len(n))
+  hc <- tryCatch(stats::hclust(d, method = "average"), error = function(e) NULL)
+  if (is.null(hc)) return(seq_len(n))
+  hc$order
 }
 
 .p_density <- function(cc, qc, th) {
@@ -569,10 +604,10 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
     s = rep(colnames(d$y), each = length(d$x)),
     stringsAsFactors = FALSE)
   df$flagcat <- factor(unname(cat_by_id[df$s]), levels = names(.MQC_FLAG_COLS))
-  df$flagcat[is.na(df$flagcat)] <- "pass"
+  df$flagcat[is.na(df$flagcat)] <- "OK"
   df <- df[is.finite(df$y), , drop = FALSE]
   ## Flagged curves drawn last and opaque so they are visible over the cohort.
-  df$flagged <- df$flagcat != "pass"
+  df$flagged <- df$flagcat != "OK"
   df <- df[order(df$flagged), , drop = FALSE]
   nflag <- length(unique(df$s[df$flagged]))
   print(ggplot2::ggplot(df, ggplot2::aes(.data$x, .data$y, group = .data$s,
@@ -588,8 +623,8 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
       x = "beta", y = "density"))
 }
 
-## chrX against chrY, coloured by REPORTED sex, with the strict cut-off drawn
-## and the call-rate/intensity failures ringed.
+## chrX against chrY, coloured by reported sex, with the cut-off drawn. No
+## subtitle: the method belongs in METHODS.md, not on the plot.
 .p_sex <- function(qc, cc, th) {
   has_int <- all(c("sex_chrX_intensity", "sex_chrY_intensity") %in% names(qc)) &&
     any(is.finite(qc$sex_chrX_intensity) & is.finite(qc$sex_chrY_intensity))
@@ -600,41 +635,21 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
   if (!nrow(d)) return(invisible(NULL))
   d$reported <- factor(ifelse(is.na(d$reported_sex), "not reported", d$reported_sex),
                        levels = c("F", "M", "not reported"))
-  d$qcfail <- d$flagcat != "pass"
   cut <- attr(cc, "sex_threshold") %||% cc$sex_threshold
-  called <- any(!is.na(d$inferred_sex))
 
   p <- ggplot2::ggplot(d, ggplot2::aes(.data$sex_chrX_intensity,
-                                       .data$sex_chrY_intensity))
-  ## Ring the QC failures first, so the ring sits under the point.
-  if (any(d$qcfail))
-    p <- p + ggplot2::geom_point(
-      data = d[d$qcfail, , drop = FALSE], shape = 21, size = 4.2,
-      colour = "grey20", fill = NA, stroke = 0.7)
-  p <- p +
+                                       .data$sex_chrY_intensity)) +
     ggplot2::geom_point(ggplot2::aes(colour = .data$reported), size = 2.2) +
     ggplot2::scale_colour_manual(
       values = c(F = "#C0392B", M = "#2E70B8", `not reported` = "grey60"),
-      name = "reported sex", drop = FALSE)
+      name = "reported sex", drop = FALSE,
+      limits = c("F", "M", "not reported"))
   if (!is.null(cut) && is.finite(cut))
     p <- p + ggplot2::geom_hline(yintercept = cut, linetype = "dashed",
                                  colour = "grey25")
 
-  sub <- if (called)
-    sprintf(paste("Strict cut-off %s: the natural break locates the two clusters,",
-                  "then the cut-off is set %g MADs above the median of the LOW",
-                  "chrY cluster, whose spread is pure background. Ringed points",
-                  "failed call rate or intensity."),
-            if (is.null(cut) || !is.finite(cut)) "" else sprintf("at %.0f", cut),
-            mqcopts()$sexcutsd)
-  else
-    paste("No sex was called: chrY intensity is not bimodal in this cohort",
-          "(single-sex, too small, or too noisy). Ringed points failed call",
-          "rate or intensity.")
-
   print(p + th + ggplot2::labs(
     title = "Sex chromosome intensity",
-    subtitle = sub,
     x = "median chrX (X-linked) intensity",
     y = "median chrY intensity"))
 }
@@ -692,7 +707,7 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
   d <- as.data.frame(m); d$sample_id <- rownames(m)
   i <- match(d$sample_id, qc$sample_id)
   d$flagcat <- qc$flagcat[i]
-  d$flagcat[is.na(d$flagcat)] <- "pass"
+  d$flagcat[is.na(d$flagcat)] <- "OK"
 
   o <- mdsoutlier(m, cfg$mdssd)
   ring <- NULL

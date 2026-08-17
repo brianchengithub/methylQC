@@ -728,3 +728,43 @@ test_that("the cell-type panel survives a sample with no composition", {
   pdf(tempfile()); on.exit(dev.off(), add = TRUE)
   expect_silent(methylQC:::.p_cells(qc, methylQC:::.theme_qc()))
 })
+
+test_that("every flag level stays in the legend when no sample is flagged", {
+  ## The rename from pass/low call rate/... to OK/Low detection/... left three
+  ## panels assigning a level that no longer existed, which turned those
+  ## samples into NA and dropped their colour from the legend.
+  clean <- data.frame(sample_id = c("a", "b"), low_callrate = FALSE,
+                      low_intensity = FALSE, mds_outlier = FALSE,
+                      stringsAsFactors = FALSE)
+  fc <- methylQC:::.flagcat(clean)
+  expect_false(anyNA(fc))
+  expect_equal(levels(fc), names(methylQC:::.MQC_FLAG_COLS))
+
+  ## Both scales pin their limits, so a level cannot fall out of a guide.
+  for (sc in list(methylQC:::.scale_flag(), methylQC:::.scale_flag_fill())) {
+    expect_false(sc$drop)
+    expect_equal(sc$limits, names(methylQC:::.MQC_FLAG_COLS))
+  }
+})
+
+test_that("cluster ordering is a permutation, and degrades safely", {
+  f <- methylQC:::.cluster_order
+  set.seed(51)
+  m <- matrix(runif(30 * 4), 30, 4)
+  o <- f(m)
+  expect_equal(sort(o), seq_len(30))          # a permutation, nothing dropped
+
+  expect_equal(f(matrix(1, 2, 3)), 1:2)       # too few rows to cluster
+  expect_equal(f(matrix(1, 5, 3)), 1:5)       # identical rows, zero distance
+})
+
+test_that("the run summary no longer advertises qcplots", {
+  d <- file.path(tempdir(), paste0("rs", as.integer(runif(1) * 1e6)))
+  dir.create(dirname(mqcpath(d, "sheet")), recursive = TRUE)
+  on.exit(unlink(d, recursive = TRUE))
+  utils::write.csv(data.frame(sample_id = "a", flagged = FALSE),
+                   mqcpath(d, "sheet"), row.names = FALSE)
+  txt <- methylQC:::.run_summary(d)
+  expect_false(any(grepl("Retune|qcplots", txt)))
+  expect_true(any(grepl("Report", txt)))
+})
