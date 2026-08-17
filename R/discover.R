@@ -12,7 +12,7 @@
 #' @param indir directory to search.
 #' @param recursive search subdirectories.
 #' @param sheet optional explicit path to a sample sheet; when \code{NULL},
-#'   sheets are auto-detected using the \code{sheetpattern} option.
+#'   sheets are auto-detected using the \code{sheetpatterns} option.
 #' @param logger optional logger.
 #' @return a data.frame with at least \code{sample_id}, \code{Basename},
 #'   \code{batch_folder} and \code{detected_platform}.
@@ -68,7 +68,9 @@ discover <- function(indir, recursive = TRUE, sheet = NULL, logger = NULL) {
 
   out$detected_platform <- .detect_platform(base, batch, logger)
 
-  ss <- .read_sheets(indir, sheet, cfg, logger)
+  ## Pass the discovered identifiers in, so a candidate sheet's id column can
+  ## be confirmed against what is actually on disk rather than guessed at.
+  ss <- .read_sheets(indir, sheet, cfg, targets = c(sentrix, sid), logger)
   if (!is.null(ss) && nrow(ss)) out <- .join_sheet(out, ss, cfg, logger)
 
   logger$log("discover", sprintf("%d samples across %d batch folder(s)",
@@ -114,36 +116,67 @@ discover <- function(indir, recursive = TRUE, sheet = NULL, logger = NULL) {
   out
 }
 
-.read_sheets <- function(indir, sheet, cfg, logger) {
-  files <- if (!is.null(sheet)) sheet else
-    list.files(indir, pattern = cfg$sheetpattern, recursive = TRUE,
-               full.names = TRUE)
-  files <- files[file.exists(files)]
-  if (!length(files)) {
-    logger$log("discover", paste(
-      "no sample sheet found. Looked for files matching the 'sheetpattern'",
-      "option; pass sheet= explicitly if yours is named differently."),
-      warn = TRUE)
-    return(NULL)
+## Search for the sample sheet in tiers, strictest first, stopping as soon as a
+## tier yields something usable. "Usable" means it parses as a table AND has a
+## column that actually looks like a sample identifier -- a filename match
+## alone is not enough, because the looser tiers exist precisely to cast a wide
+## net and will otherwise drag in unrelated text files.
+.read_sheets <- function(indir, sheet, cfg, targets = NULL, logger) {
+  if (!is.null(sheet)) {
+    files <- sheet[file.exists(sheet)]
+    if (!length(files)) {
+      logger$log("discover", sprintf("sheet= was given but does not exist: %s",
+                                     paste(sheet, collapse = ", ")), warn = TRUE)
+      return(NULL)
+    }
+    return(.assemble_sheets(files, cfg, targets, logger, strict = FALSE))
   }
 
+  pats <- cfg$sheetpatterns %||% cfg$sheetpattern
+  for (i in seq_along(pats)) {
+    files <- list.files(indir, pattern = pats[i], recursive = TRUE,
+                        full.names = TRUE)
+    files <- files[file.exists(files)]
+    if (!length(files)) next
+    got <- .assemble_sheets(files, cfg, targets, logger, strict = TRUE)
+    if (!is.null(got)) {
+      logger$log("discover", sprintf("sample sheet found at search tier %d of %d",
+                                     i, length(pats)))
+      return(got)
+    }
+  }
+  logger$log("discover", paste(
+    "no usable sample sheet found. Every tier of the 'sheetpatterns' search",
+    "either matched nothing, or matched files that did not parse as a table",
+    "with a sample identifier column. Pass sheet= explicitly to override."),
+    warn = TRUE)
+  NULL
+}
+
+## Read a set of candidate files and combine those that qualify.
+.assemble_sheets <- function(files, cfg, targets, logger, strict) {
   frames <- lapply(files, function(f) {
     df <- tryCatch(.read_table(f, logger), error = function(e) {
       logger$log("discover", sprintf("could not read %s: %s", basename(f),
                                      conditionMessage(e)), warn = TRUE)
       NULL
     })
-    if (is.null(df) || !nrow(df)) return(NULL)
-    ## A broad filename pattern will pick up unrelated text files, so keep only
-    ## tables that actually look like a sample annotation.
-    if (is.na(.resolve_col(df, c(cfg$idcol, cfg$idaliases)))) {
-      logger$log("discover", sprintf(
-        "ignoring %s: no recognisable sample identifier column (%s)",
+    if (is.null(df) || !nrow(df) || !ncol(df)) return(NULL)
+    id <- .pick_col(df, c(cfg$idcol, cfg$idaliases), "id", targets = targets)
+    ## Content alone is not enough to qualify a FILE as a sample sheet when
+    ## there are no discovered identifiers to check against -- any unique
+    ## column would do. With no ground truth, require a recognised name.
+    if (!is.na(id$col) && identical(id$how, "content") &&
+        (is.null(targets) || !length(targets))) id$col <- NA_character_
+    if (is.na(id$col)) {
+      if (strict) logger$log("discover", sprintf(
+        "ignoring %s: no column looks like a sample identifier (columns: %s)",
         basename(f), paste(utils::head(names(df), 6), collapse = ", ")))
       return(NULL)
     }
-    logger$log("discover", sprintf("read %s: %d row(s), %d column(s)",
-                                   basename(f), nrow(df), ncol(df)))
+    logger$log("discover", sprintf(
+      "read %s: %d row(s), %d column(s); identifier column '%s' (by %s)",
+      basename(f), nrow(df), ncol(df), id$col, id$how))
     df
   })
   frames <- Filter(Negate(is.null), frames)
@@ -200,7 +233,9 @@ discover <- function(indir, recursive = TRUE, sheet = NULL, logger = NULL) {
 ## columns. Every plausible key is tried and the one that matches most samples
 ## wins, so the user does not have to know which convention their sheet uses.
 .join_sheet <- function(out, ss, cfg, logger) {
-  key <- .resolve_col(ss, c(cfg$idcol, cfg$idaliases))
+  tgt <- unique(c(out$sentrix, out$sample_id, basename(out$Basename)))
+  key <- .pick_col(ss, c(cfg$idcol, cfg$idaliases), "id", targets = tgt,
+                   logger = logger)$col
   keys <- list()
   if (!is.na(key)) keys[[key]] <- as.character(ss[[key]])
 
@@ -263,11 +298,8 @@ discover <- function(indir, recursive = TRUE, sheet = NULL, logger = NULL) {
   out
 }
 
-#' Find the first matching column name in a data frame
-#'
-#' @param df data frame
-#' @param candidates candidate column names, in priority order
-#' @return the matched name, or \code{NA_character_}
+## Find the first matching column name, by name alone. Used where a content
+## check is not applicable (composing Sentrix_ID + Sentrix_Position).
 #' @keywords internal
 #' @noRd
 .resolve_col <- function(df, candidates) {
@@ -277,31 +309,4 @@ discover <- function(indir, recursive = TRUE, sheet = NULL, logger = NULL) {
     if (length(hit)) return(nm[hit[1]])
   }
   NA_character_
-}
-
-#' Validate that a sample sheet has the columns downstream stages need
-#'
-#' @param ss sample sheet
-#' @param logger optional logger
-#' @return a list naming the resolved columns, invisibly
-#' @export
-#' @examples
-#' \dontrun{
-#' checkmeta(ss)
-#' }
-checkmeta <- function(ss, logger = NULL) {
-  logger <- logger %||% nulllog()
-  cfg <- mqcopts()
-  got <- list(
-    id    = .resolve_col(ss, c(cfg$idcol, cfg$idaliases)),
-    sex   = .resolve_col(ss, c(cfg$sexcol, cfg$sexaliases)),
-    age   = .resolve_col(ss, c(cfg$agecol, cfg$agealiases)),
-    batch = .resolve_col(ss, c(cfg$batchcol, cfg$batchaliases)),
-    cell  = .resolve_col(ss, c(cfg$cellcol, cfg$cellaliases)),
-    donor = .resolve_col(ss, c(cfg$donorcol, cfg$donoraliases)))
-  for (k in names(got)) {
-    if (is.na(got[[k]]))
-      logger$log("meta", sprintf("no %s column found; related checks are skipped", k))
-  }
-  invisible(got)
 }

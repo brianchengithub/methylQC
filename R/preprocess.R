@@ -14,8 +14,9 @@
 ##
 ##     read IDAT
 ##       -> prepSesame "C"    -> measure intensity / dye bias / channel counts
-##       -> prepSesame "D"    -> ELBAR(return.pval = TRUE)      [ONE call]
-##       -> prepSesame "B"    -> getBetas(mask = FALSE)
+##       -> prepSesame "DB"   -> dye bias correction, then noob
+##       -> ELBAR(return.pval = TRUE)                           [ONE call]
+##       -> getBetas(mask = FALSE)
 ##
 ## Four deliberate differences from v2, each traced to sesame's source:
 ##
@@ -23,14 +24,20 @@
 ##    data's own intensity profile rather than assuming out-of-band signal is
 ##    background.
 ##
-## 2. Detection runs ONCE and its p-values are kept. v2 ran pOOBAH inside
-##    openSesame (which set the mask) and then ran it AGAIN in extract_detP()
-##    on the finished, post-noob object. noob rewrites MG/UG/MR/UR
-##    (sesame R/background.R:112-118), and those columns are where the
-##    out-of-band background lives, so the second run compared corrected
-##    foreground against corrected background. The stored p-values therefore
-##    did not match the stored mask. Capturing the single call fixes that and
-##    removes one full detection pass per sample.
+## 2. Detection runs ONCE, after noob, and its p-values are kept. v2 ran
+##    pOOBAH inside openSesame (which set the mask) and then ran it AGAIN in
+##    extract_detP() on the finished object, so the stored p-values did not
+##    match the stored mask.
+##
+##    The ordering deserves care, because the right answer differs by method.
+##    pOOBAH DEFINES background as the out-of-band signal, and noob rewrites
+##    MG/UG/MR/UR (sesame R/background.R:112-118) -- exactly those columns --
+##    so pOOBAH after noob compares corrected foreground against corrected
+##    background and is incoherent. ELBAR does not: it re-derives background
+##    empirically from whatever data it is handed, so running it after noob is
+##    self-consistent, and running it BEFORE noob breaks it. methylQC 3.0.1
+##    carried the pOOBAH-specific argument across to ELBAR and put detection
+##    before noob; the consequence is documented at the call site below.
 ##
 ## 3. "Q" is dropped. qualityMask() writes only to sdf$mask
 ##    (sesame R/mask.R:176-186 -> addMask at :15-21) and nothing downstream in
@@ -107,15 +114,27 @@ process_one <- function(pfx, platform, addr, keep_sdf = FALSE,
     res$stats <- st
     if (isTRUE(want_design)) res$design <- designmask(sdf)
 
-    ## ---- stage D: dye bias, then detection (ONE ELBAR call) --------------
-    sdf <- sesame::prepSesame(sdf, "D")
+    ## ---- stages D and B: dye bias, then noob -----------------------------
+    sdf <- sesame::prepSesame(sdf, "DB")
+
+    ## ---- detection: ONE ELBAR call, after noob ---------------------------
+    ## ELBAR must run AFTER noob. It locates background as the low-intensity
+    ## population whose beta values are undifferentiated around 0.5, and
+    ## without noob the two channels still carry different additive offsets, so
+    ## dark type II probes (M green, U red) are pushed towards 0 and 1 while
+    ## dark type I probes (both alleles one channel) stay near 0.5. The pooled
+    ## distribution is then bimodal, ELBAR reports "Background signal is
+    ## dichotomous", abandons the search and defines background from the ten
+    ## dimmest probes alone. Measured on EPIC.1.SigDF: beta spread across the
+    ## 500 dimmest probes is 0.758 before noob against 0.083 after, and the
+    ## fallback leaves eight distinct p-values for the whole array with every
+    ## probe at p = 0 -- detection silently switched off.
     pv <- sesame::ELBAR(sdf, return.pval = TRUE)
     pv[is.na(pv)] <- 1.0                    # fail closed
     res$pvals <- pv
     res$phist <- phist_one(pv)
 
-    ## ---- stage B: noob, then unmasked betas ------------------------------
-    sdf <- sesame::prepSesame(sdf, "B")
+    ## ---- unmasked betas --------------------------------------------------
     b <- sesame::getBetas(sdf, mask = FALSE)
     res$betas <- b
 

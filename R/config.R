@@ -7,16 +7,24 @@
 .mqc_defaults <- list(
 
   ## ---- sample sheet column resolution ------------------------------------
-  ## Any delimited file whose name looks like a sample annotation. The 3.0.x
-  ## pattern required the literal string "sample?sheet", so a file named
-  ## samples.BM.PH1.txt -- a perfectly ordinary name -- was never found and the
-  ## run silently proceeded with no metadata at all.
-  sheetpattern  = "(?i)(sample|target|pheno|manifest|annot).*\\.(csv|tsv|txt|xlsx?)$",
+  ## Tried in order, stopping at the first tier that yields a readable table
+  ## with a recognisable identifier column. Starting strict keeps the common
+  ## case predictable -- an Illumina SampleSheet.csv sitting next to the IDATs
+  ## is found by tier 1 and nothing else is even opened -- while the later
+  ## tiers rescue lab-made sheets such as samples.BM.PH1.txt, which the 3.0.x
+  ## single pattern never matched, leaving the run with no metadata at all.
+  sheetpatterns = c(
+    "(?i)^sample.?sheet\\.(csv|xlsx?)$",                     # the canonical name
+    "(?i)^sample.?sheet.*\\.(csv|xlsx?|tsv|txt)$",           # SampleSheet_v2.csv
+    "(?i)^(samples?|targets?|pheno(type)?|manifest|annot\\w*)[._-].*\\.(csv|tsv|txt|xlsx?)$",
+    "(?i)(sample|target|pheno|manifest|annot).*\\.(csv|tsv|txt|xlsx?)$"),
   idcol         = "Sample_Name",
-  idaliases     = c("Sample_Name", "sample_name", "Sample_ID", "sample_id",
-                    "SampleID", "Name", "ID",
-                    ## file-name style identifiers, common in lab-made sheets
-                    "Fname", "FileName", "File_Name", "File", "Array",
+  ## Deliberately NOT File_Name/FileName: those name the IDAT file, which is
+  ## already discovered from disk, and treating them as the sample identifier
+  ## invites a sheet's file column to shadow its real sample column.
+  idaliases     = c("Sample_Name", "sample_name", "SampleName", "Sample.Name",
+                    "Sample_ID", "sample_id", "SampleID", "Sample",
+                    "Name", "ID", "Fname", "Array",
                     "Basename", "Sentrix", "Sentrix_Barcode", "Barcode"),
   basecol       = "Basename",
   sexcol        = "Reported_Sex",

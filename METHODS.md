@@ -1,6 +1,6 @@
 # methylQC methods
 
-Version 3.0.0. This document explains what the pipeline does and why. Every
+Version 3.0.2. This document explains what the pipeline does and why. Every
 claim about sesame's behaviour below was traced to a specific location in the
 sesame source (`github.com/zwdzwd/sesame`, master at the time of writing) and
 those locations are cited inline so that they can be re-checked.
@@ -49,8 +49,9 @@ methylQC v3 runs, per sample:
 ```
 read IDAT
   -> prepSesame "C"   -> record instrument diagnostics
-  -> prepSesame "D"   -> ELBAR(return.pval = TRUE)        [one call]
-  -> prepSesame "B"   -> getBetas(mask = FALSE)
+  -> prepSesame "DB"  -> dye bias correction, then noob
+  -> ELBAR(return.pval = TRUE)                            [one call]
+  -> getBetas(mask = FALSE)
 ```
 
 Four deliberate departures.
@@ -101,25 +102,62 @@ did not (P = 0.71), and that comparison was made in low-input datasets
 spanning single cell to 250 ng. For standard-input cohorts the advantage may
 be smaller. The gain is coverage, not demonstrated accuracy.
 
-### 2.2 Detection runs once, before noob
+### 2.2 Detection runs once, after noob
 
-noob rewrites all four signal columns, `MG`, `UG`, `MR`, `UR`, replacing each
-intensity with a background-subtracted estimate plus a flat offset of 15
-(`R/background.R:112-118`). Those columns are where the out-of-band
-background lives — the out-of-band signal is a view into them, not a separate
-object. So noob background-subtracts the background reference itself.
+The ordering constraint is real, but it points the opposite way for the two
+detection methods, and methylQC 3.0.1 got it wrong by carrying a
+pOOBAH-specific argument across to ELBAR.
 
-A detection calculation performed after noob therefore compares corrected
-foreground against corrected background, which is a different comparison from
-the one that produced the mask. sesame states the constraint itself in
-`R/open.R:34`: pOOBAH must precede noob because noob modifies the out-of-band
-signal.
+**For pOOBAH, detection must precede noob.** noob rewrites all four signal
+columns, `MG`, `UG`, `MR`, `UR`, replacing each intensity with a
+background-subtracted estimate plus a flat offset of 15
+(`R/background.R:112-118`). Those columns are where the out-of-band background
+lives — the out-of-band signal is a view into them, not a separate object — so
+noob background-subtracts the background reference itself. pOOBAH *defines*
+background as that out-of-band signal, so running it afterwards compares
+corrected foreground against corrected background. sesame states the
+constraint in `R/open.R:34`.
+
+**For ELBAR, detection must follow noob.** ELBAR does not treat out-of-band
+signal as background by definition. It pools in-band and out-of-band readings,
+sorts by total intensity, and locates background empirically as the
+low-intensity population whose beta values are undifferentiated around 0.5 —
+then uses that population as the reference distribution for the p-value. It
+re-derives that reference from whatever data it is handed, so running it on
+noob-corrected signal is self-consistent.
+
+Running it *before* noob is not. Type II probes measure M in green and U in
+red — different channels — while type I probes measure both alleles in the
+same channel. Before noob the two channels still carry different additive
+background offsets, so dark type II probes are pushed toward beta 0 and 1
+while dark type I probes stay near 0.5. The pooled low-intensity distribution
+is then bimodal, there is no knee to find, and ELBAR emits `Background signal
+is dichotomous`. `dyeBiasNL` rescales the channels against each other but does
+not remove the additive offset; noob does.
+
+Measured on `EPIC.1.SigDF`, the reference EPIC v1 array in sesameData:
+
+| | beta spread, 500 dimmest probes | background probes used | distinct p-values | call rate |
+|---|---|---|---|---|
+| `C -> D -> ELBAR` (3.0.1) | 0.758 | 10 | 8 | 0.9999 |
+| `C -> D -> B -> ELBAR` | 0.083 | ~500 | 1108 | 0.9920 |
+
+When the check trips, ELBAR abandons the search and takes its background from
+`df$MU[10]` — the ten dimmest probes. An ECDF over ten values leaves eight
+distinct p-values for the entire array, every probe at p = 0, and a call rate
+of 0.9999 by construction: detection is silently switched off. Comparing the
+two orderings, 0.78% of probes (~6,800 on EPIC) are called detected under the
+pre-noob ordering that the post-noob ordering correctly masks, and none the
+other way.
+
+methylQC v3.0.2 therefore runs `C` → (statistics) → `DB` → ELBAR →
+`getBetas`. Per-sample statistics are still measured after `C` and before `D`
+and `B`, so the reasoning in section 4.1 is unaffected.
 
 methylQC v2 ran detection twice: once inside `openSesame` (setting the mask)
-and again in `extract_detP()` on the finished, post-noob object. The stored
-p-values consequently did not correspond to the stored mask. v3 captures the
-single pre-noob call, which fixes the correspondence and removes one full
-detection pass per sample.
+and again in `extract_detP()` on the finished object, so the stored p-values
+did not correspond to the stored mask. v3 captures a single call, which fixes
+the correspondence and removes one full detection pass per sample.
 
 Because the p-values are retained rather than thresholded, `detP <= detp`
 reproduces the detection mask exactly, at whatever threshold is chosen later.

@@ -12,7 +12,7 @@ discover(indir, recursive = TRUE, sheet = NULL, logger = NULL)
 \item{recursive}{search subdirectories.}
 
 \item{sheet}{optional explicit path to a sample sheet; when \code{NULL},
-sheets are auto-detected using the \code{sheetpattern} option.}
+sheets are auto-detected using the \code{sheetpatterns} option.}
 
 \item{logger}{optional logger.}
 }

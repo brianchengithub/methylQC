@@ -40,8 +40,11 @@ methylQC complete - ~/qcout
 
 **Preprocessing.** Each IDAT pair is read and passed through channel inference,
 non-linear dye bias correction and noob background correction. Detection
-p-values come from ELBAR, computed once, between dye bias correction and noob —
-the only point at which they correspond to the signal they describe.
+p-values come from ELBAR, computed once, after noob — ELBAR locates background
+empirically from the corrected signal, and running it earlier leaves the two
+colour channels carrying different additive offsets, which makes the
+low-intensity beta distribution bimodal and causes ELBAR to fall back to a
+ten-probe background that disables detection entirely.
 
 **Nothing on disk is masked.** `betas_all.rds` holds every probe for every
 sample. The probe design mask and the detection p-values are stored separately,
@@ -131,6 +134,28 @@ outdir/
     qc_plots.pdf
     qccache.rds                       derived summaries for qcplots()
 ```
+
+### Sample sheets
+
+The sheet is found in tiers, strictest first: `SampleSheet.csv` next to the
+IDATs is matched immediately and nothing else is opened. If that finds nothing
+usable the search widens to `SampleSheet*.csv`, then to `samples.*`,
+`targets.*`, `pheno.*` and similar, then to any delimited file whose name
+contains one of those words — including `.txt`. A candidate only qualifies once
+it parses as a table *and* has a column that looks like a sample identifier, so
+casting a wide net does not drag in unrelated text files. The delimiter is
+inferred from the header rather than assumed, and an Illumina `[Data]` preamble
+is skipped.
+
+Columns are then resolved by name and **confirmed against their values**: a
+column called `Sex` whose entries are not sexes is rejected in favour of one
+whose entries are, and a sheet whose headers no alias list anticipates still
+resolves from content alone. The log names every column it chose and how.
+
+Identifiers are matched flexibly too — your sheet may key on the Sentrix
+barcode, the IDAT file name, a full path, or `Sentrix_ID` plus
+`Sentrix_Position` in separate columns; each is tried and the pairing that
+matches the most samples wins.
 
 There is exactly **one** `sample_sheet.csv`. Stage 1 creates it, Stage 2 adds
 columns to it, and `qcplots()` keeps its flags in step with the report. It is
@@ -250,6 +275,8 @@ mqcreset()                   # revert
 | `collapsemethod` | `"peters"` | replicate selection rule |
 | `dishref` / `dishmethod` | `"blood"` / `"RPC"` | EpiDISH settings |
 | `snpmin` | `0.70` | concordance below which an unrelated pair is not reported |
+| `sheetpatterns` | 4 patterns | sample sheet filename search, strictest first |
+| `idaliases` | see `mqcdefaults()` | accepted sample identifier column names |
 
 ---
 
@@ -276,7 +303,7 @@ roxygen2::roxygenise()
 ```
 
 ```sh
-R CMD build methylQC && R CMD check methylQC_3.0.1.tar.gz
+R CMD build methylQC && R CMD check methylQC_3.0.2.tar.gz
 ```
 
 See `METHODS.md` for the methodology in full, and `METHODS.txt` in any output

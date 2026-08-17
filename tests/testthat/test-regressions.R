@@ -207,8 +207,9 @@ test_that("a lab-style sheet named samples.<x>.txt is found and joined", {
                Donor = c("D1", "D2"), stringsAsFactors = FALSE),
     file.path(d, "samples.BM.PH1.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
 
-  expect_match(basename(file.path(d, "samples.BM.PH1.txt")),
-               mqcdefaults()$sheetpattern, perl = TRUE)
+  expect_true(any(vapply(mqcdefaults()$sheetpatterns,
+                         function(p) grepl(p, "samples.BM.PH1.txt", perl = TRUE),
+                         logical(1))))
 
   ss <- data.frame(sample_id = ids, sentrix = ids,
                    Basename = file.path(d, ids), stringsAsFactors = FALSE)
@@ -257,5 +258,84 @@ test_that("a text file that is not a sample sheet is ignored", {
   dir.create(d, recursive = TRUE); on.exit(unlink(d, recursive = TRUE))
   writeLines(c("note\tvalue", "sampled on\t2026-01-01"),
              file.path(d, "sample_notes.txt"))
-  expect_null(methylQC:::.read_sheets(d, NULL, mqcdefaults(), methylQC:::nulllog()))
+  expect_null(methylQC:::.read_sheets(d, NULL, mqcdefaults(),
+                                      logger = methylQC:::nulllog()))
+})
+
+test_that("ELBAR no longer reports a dichotomous background on a real EPIC array", {
+  skip_if_not_installed("sesameData")
+  sdf <- tryCatch(sesameData::sesameDataGet("EPIC.1.SigDF"), error = function(e) NULL)
+  skip_if(is.null(sdf), "sesameData cache unavailable")
+
+  spread <- function(s) {
+    df <- rbind(sesame:::signalMU(s, mask = FALSE, MU = TRUE),
+                sesame:::signalMU_oo(s, MU = TRUE))
+    df$beta <- df$M / (df$M + df$U)
+    df <- df[order(df$MU), ]
+    df <- df[!is.na(df$MU) & !is.nan(df$beta), ]
+    q <- stats::quantile(df$beta[seq_len(500)], c(0.05, 0.95), na.rm = TRUE)
+    unname(q[2] - q[1])
+  }
+  ## ELBAR calls the background dichotomous, and falls back to the ten dimmest
+  ## probes, when this spread exceeds 0.5.
+  expect_gt(spread(sesame::prepSesame(sdf, "CD")), 0.5)    # the 3.0.1 ordering
+  expect_lt(spread(sesame::prepSesame(sdf, "CDB")), 0.5)   # with noob first
+
+  w <- NULL
+  pv <- withCallingHandlers(
+    sesame::ELBAR(sesame::prepSesame(sdf, "CDB"), return.pval = TRUE),
+    warning = function(x) { w <<- c(w, conditionMessage(x)); invokeRestart("muffleWarning") })
+  expect_false(any(grepl("dichotomous", w %||% "")))
+  expect_gt(length(unique(pv)), 100L)     # not the 8 values the fallback gives
+})
+
+test_that("the sheet search runs strict patterns before loose ones", {
+  d <- file.path(tempdir(), paste0("tier", as.integer(runif(1) * 1e6)))
+  dir.create(d, recursive = TRUE); on.exit(unlink(d, recursive = TRUE))
+  ids <- c("200607130026_R06C01", "200607130026_R07C01")
+
+  ## A loose-tier decoy and a canonical sheet in the same directory.
+  utils::write.table(data.frame(Fname = ids, Age = c(9, 9)),
+                     file.path(d, "samples.decoy.txt"), sep = "\t",
+                     row.names = FALSE, quote = FALSE)
+  utils::write.csv(data.frame(Sample_Name = ids, Age = c(41, 62)),
+                   file.path(d, "SampleSheet.csv"), row.names = FALSE)
+
+  got <- methylQC:::.read_sheets(d, NULL, mqcdefaults(), targets = ids,
+                                 logger = methylQC:::nulllog())
+  expect_equal(got$Age, c(41, 62))        # tier 1 won; the decoy was never read
+
+  file.remove(file.path(d, "SampleSheet.csv"))
+  got2 <- methylQC:::.read_sheets(d, NULL, mqcdefaults(), targets = ids,
+                                  logger = methylQC:::nulllog())
+  expect_equal(got2$Age, c(9, 9))         # falls through to the loose tier
+})
+
+test_that("columns are confirmed against their values, not just their names", {
+  ids <- c("200607130026_R06C01", "200607130026_R07C01", "200607130026_R08C01")
+
+  ## Headers that no alias list anticipates: resolved from content alone.
+  odd <- data.frame(barcode_v2 = ids, yrs = c(41, 62, 55),
+                    gender_code = c("male", "female", "female"),
+                    stringsAsFactors = FALSE)
+  cols <- checkmeta(odd, logger = methylQC:::nulllog())
+  expect_equal(cols$id, "barcode_v2")
+  expect_equal(cols$age, "yrs")
+  expect_equal(cols$sex, "gender_code")
+
+  ## A column named Sex whose contents are not sexes must not be trusted over
+  ## one whose contents are.
+  misleading <- data.frame(Sample_Name = ids,
+                           Sex = c("collected 2021", "collected 2022", "n/a"),
+                           g = c("F", "M", "F"), stringsAsFactors = FALSE)
+  c2 <- checkmeta(misleading, logger = methylQC:::nulllog())
+  expect_equal(c2$sex, "g")
+})
+
+test_that("File_Name is not treated as the sample identifier", {
+  expect_false(any(tolower(c("File_Name", "FileName", "File")) %in%
+                     tolower(mqcdefaults()$idaliases)))
+  expect_true("Fname" %in% mqcdefaults()$idaliases)
+  expect_true(all(c("Sample_Name", "SampleName", "Sample_ID", "SampleID") %in%
+                    mqcdefaults()$idaliases))
 })

@@ -173,7 +173,7 @@ qc <- function(indir, outdir, platform = NULL, sheet = NULL,
   ## ---- persist Stage 1 ---------------------------------------------------
   prov <- list(methylqc_version = as.character(utils::packageVersion("methylQC")),
                sesame_version = as.character(utils::packageVersion("sesame")),
-               platform = platform, prep = "C|D+ELBAR|B",
+               platform = platform, prep = "C|DB|ELBAR",
                created = as.character(Sys.time()))
   if (!is.null(s1$betas)) {
     attr(s1$betas, "methylqc") <- prov

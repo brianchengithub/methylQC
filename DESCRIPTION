@@ -1,8 +1,8 @@
 Package: methylQC
 Type: Package
 Title: Quality Control and Preprocessing for Illumina DNA Methylation Arrays
-Version: 3.0.1
-Date: 2026-08-16
+Version: 3.0.2
+Date: 2026-08-17
 Authors@R: person("Brian", "Chen", role = c("aut", "cre"),
                   email = "brianchen450k@gmail.com")
 Description: A two-stage quality control and preprocessing pipeline for
