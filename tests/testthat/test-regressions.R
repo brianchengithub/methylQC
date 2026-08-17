@@ -339,3 +339,49 @@ test_that("File_Name is not treated as the sample identifier", {
   expect_true(all(c("Sample_Name", "SampleName", "Sample_ID", "SampleID") %in%
                     mqcdefaults()$idaliases))
 })
+
+test_that("channel switch counts are measured before C, where they mean something", {
+  skip_if_not_installed("sesameData")
+  sdf <- tryCatch(sesameData::sesameDataGet("EPIC.1.SigDF"), error = function(e) NULL)
+  skip_if(is.null(sdf), "sesameData cache unavailable")
+
+  before <- methylQC:::stats_channel(sdf)
+  after  <- methylQC:::stats_channel(sesame::prepSesame(sdf, "C"))
+
+  ## Before C the statistic counts probes the array mis-declared.
+  expect_gt(before$inf1_r2g + before$inf1_g2r, 0)
+  ## After C it is zero by construction -- C resolves exactly that disagreement.
+  expect_equal(after$inf1_r2g, 0)
+  expect_equal(after$inf1_g2r, 0)
+
+  ## And after C the diagonal merely repeats the type I probe counts, so all
+  ## four columns carry no information at that point.
+  st <- methylQC:::stats_raw(sesame::prepSesame(sdf, "C"))
+  expect_equal(after$inf1_r2r, st$n_probes_ir)
+  expect_equal(after$inf1_g2g, st$n_probes_ig)
+})
+
+test_that("dye bias and out-of-band intensity are measured before the step that removes them", {
+  skip_if_not_installed("sesameData")
+  sdf <- tryCatch(sesameData::sesameDataGet("EPIC.1.SigDF"), error = function(e) NULL)
+  skip_if(is.null(sdf), "sesameData cache unavailable")
+
+  c_  <- methylQC:::stats_raw(sesame::prepSesame(sdf, "C"))
+  cd  <- methylQC:::stats_raw(sesame::prepSesame(sdf, "CD"))
+  cdb <- methylQC:::stats_raw(sesame::prepSesame(sdf, "CDB"))
+
+  ## D corrects dye bias by definition, so measuring after it reads ~1.
+  expect_gt(abs(c_$rg_ratio - 1), abs(cd$rg_ratio - 1))
+  expect_lt(abs(cd$rg_ratio - 1), 0.05)
+  ## noob subtracts background, so out-of-band intensity shrinks across B.
+  expect_gt(c_$mean_oob_red, cdb$mean_oob_red)
+})
+
+test_that("the assembled statistics row matches the template exactly", {
+  ## The row is now built from two calls taken at different points in the
+  ## chain, so the column set has to be asserted rather than assumed.
+  tmpl <- methylQC:::stats_raw_template()
+  expect_true(all(c("inf1_r2r", "inf1_g2g", "inf1_r2g", "inf1_g2r",
+                    "sex_chrX_intensity", "sex_chrY_intensity") %in% names(tmpl)))
+  expect_equal(sum(duplicated(names(tmpl))), 0L)
+})

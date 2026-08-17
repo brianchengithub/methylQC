@@ -13,7 +13,8 @@
 ## methylQC v3 runs, per sample:
 ##
 ##     read IDAT
-##       -> prepSesame "C"    -> measure intensity / dye bias / channel counts
+##       -> stats_channel()   -> Infinium-I channel switch counts (BEFORE "C")
+##       -> prepSesame "C"    -> measure intensity / dye bias / probe counts
 ##       -> prepSesame "DB"   -> dye bias correction, then noob
 ##       -> ELBAR(return.pval = TRUE)                           [ONE call]
 ##       -> getBetas(mask = FALSE)
@@ -51,16 +52,38 @@
 ##    addressable -- which matters when a clock probe sits in the design mask
 ##    and you want its value anyway.
 ##
-## 4. "I" is not in the string because we call ELBAR() ourselves between D and
-##    B. Running "I" as well would compute the same thing a second time and
-##    throw away the p-values.
+## 4. "I" is not in the string because we call ELBAR() ourselves after B.
+##    Running "I" as well would compute the same thing a second time and throw
+##    away the p-values.
 ##
-## Statistics are measured after "C" and before "D" and "B" because they are
-## instrument and background diagnostics: the out-of-band intensity summaries
-## measure background, and running them after noob measures the background
-## remaining after background was subtracted. Dye bias is likewise measured
-## before it is corrected. Channel counts must come after "C" because "C"
-## produces them.
+## WHERE THE STATISTICS ARE MEASURED
+## ---------------------------------
+## Each group is taken at the last point before the step that would destroy it,
+## verified on EPIC.1.SigDF rather than assumed:
+##
+##   channel switches  BEFORE "C".  "C" resolves the very disagreement the
+##                     statistic counts, so afterwards R2G and G2R are 0 by
+##                     construction and R2R/G2G merely repeat num_probes_IR and
+##                     num_probes_IG. Before "C" the same array reports 65 and
+##                     904 switches. v3.0.1 measured these after "C" and so
+##                     recorded four uninformative columns for every sample.
+##
+##   dye bias          AFTER "C", BEFORE "D".  "D" corrects dye bias by
+##                     definition: RGratio goes 1.512 -> 0.999 across it.
+##
+##   out-of-band       AFTER "C", BEFORE "B".  These summarise background, and
+##                     noob subtracts background: mean_oob_red goes 545 -> 278.
+##                     Measuring after noob measures what background remains
+##                     after background was removed.
+##
+##   mean intensity    AFTER "C", BEFORE "D"/"B", though this one matters less
+##                     than the others. Scaling an array to 75/50/25/10% of its
+##                     signal is recovered as 0.75/0.50/0.25/0.10 before noob
+##                     and 0.751/0.503/0.254/0.105 after, so the cohort-relative
+##                     MAD rule would work either way. What noob does change is
+##                     the absolute level (about 10% lower), and `intfloor` is
+##                     an absolute threshold, so the uncorrected scale is the
+##                     one it can be calibrated against.
 ## ---------------------------------------------------------------------------
 
 ## Thresholds at which per-probe failure counts are cached, so that qcplots()
@@ -100,7 +123,16 @@ process_one <- function(pfx, platform, addr, keep_sdf = FALSE,
   withCallingHandlers(tryCatch({
     sdf <- read_idat(pfx, platform, addr)
 
-    ## ---- stage C: channel inference, then instrument diagnostics ---------
+    ## ---- channel switches: measured BEFORE C -----------------------------
+    ## inferInfiniumIChannel(summary = TRUE) reports how many Infinium-I probes
+    ## disagree with their declared channel. C is what resolves that
+    ## disagreement, so after C the off-diagonal counts are zero by
+    ## construction and the diagonal ones are just the type I probe counts
+    ## again. Measured before C they say how many probes the array mis-declared,
+    ## which is a real chemistry diagnostic.
+    ch <- stats_channel(sdf)
+
+    ## ---- stage C, then the remaining instrument diagnostics --------------
     ## Sex-chromosome intensity is measured HERE, in the worker, rather than in
     ## Stage 2 from a retained SigDF. Two numbers per sample cost nothing to
     ## carry, and it keeps the sex check working when savesdf is downgraded by
@@ -108,6 +140,7 @@ process_one <- function(pfx, platform, addr, keep_sdf = FALSE,
     ## sample swap is most likely.
     sdf <- sesame::prepSesame(sdf, "C")
     st <- stats_raw(sdf)
+    for (k in names(ch)) st[[k]] <- ch[[k]]
     si <- sexintensity(sdf)
     st$sex_chrX_intensity <- si$chrX
     st$sex_chrY_intensity <- si$chrY
@@ -157,7 +190,7 @@ process_one <- function(pfx, platform, addr, keep_sdf = FALSE,
 #' @noRd
 stats_raw <- function(sdf) {
   qc <- sesame::sesameQC_calcStats(
-    sdf, c("intensity", "channel", "numProbes", "dyeBias"))
+    sdf, c("intensity", "numProbes", "dyeBias"))
   s <- sesame::sesameQC_getStats(qc, drop = FALSE)
 
   num <- function(k) {
@@ -177,12 +210,39 @@ stats_raw <- function(sdf) {
     n_probes_ii        = num("num_probes_II"),
     n_probes_ir        = num("num_probes_IR"),
     n_probes_ig        = num("num_probes_IG"),
-    inf1_r2r           = num("InfI_switch_R2R"),
-    inf1_g2g           = num("InfI_switch_G2G"),
-    inf1_r2g           = num("InfI_switch_R2G"),
-    inf1_g2r           = num("InfI_switch_G2R"),
     na_intensity_m     = num("na_intensity_M"),
     na_intensity_u     = num("na_intensity_U"),
+    stringsAsFactors = FALSE)
+}
+
+#' Infinium-I channel switch counts, measured before channel inference
+#'
+#' \code{inferInfiniumIChannel(summary = TRUE)} reports how many Infinium-I
+#' probes were read in a channel other than the one the manifest declares. That
+#' disagreement is exactly what prep code \code{"C"} resolves, so the statistic
+#' has to be taken beforehand. Measured after \code{"C"} on a real EPIC array,
+#' \code{R2G} and \code{G2R} are 0 by construction and \code{R2R}/\code{G2G}
+#' reproduce \code{num_probes_IR}/\code{num_probes_IG} exactly -- four columns
+#' carrying no information. Measured before \code{"C"} the same array reports
+#' 65 red-to-green and 904 green-to-red switches, which is a genuine chemistry
+#' diagnostic.
+#'
+#' @param sdf a \code{SigDF} that has NOT had \code{"C"} applied.
+#' @return a one-row data.frame of the four switch counts.
+#' @keywords internal
+#' @noRd
+stats_channel <- function(sdf) {
+  s <- tryCatch({
+    qc <- sesame::sesameQC_calcStats(sdf, "channel")
+    sesame::sesameQC_getStats(qc, drop = FALSE)
+  }, error = function(e) list())
+  num <- function(k) {
+    v <- s[[k]]
+    if (is.null(v) || !length(v)) NA_real_ else as.numeric(v[1])
+  }
+  data.frame(
+    inf1_r2r = num("InfI_switch_R2R"), inf1_g2g = num("InfI_switch_G2G"),
+    inf1_r2g = num("InfI_switch_R2G"), inf1_g2r = num("InfI_switch_G2R"),
     stringsAsFactors = FALSE)
 }
 

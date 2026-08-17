@@ -242,25 +242,42 @@ treated as having passed.
 
 ### 4.1 Where each statistic is measured
 
-Instrument diagnostics are recorded after `C` and before `D` and `B`, because
-they are background and instrument measurements:
+Each group is taken at the last point before the step that would destroy it.
+The table below was measured on `EPIC.1.SigDF`, the reference EPIC v1 array in
+sesameData, rather than reasoned about.
 
-- Out-of-band intensity **measures background**. Running it after noob
-  measures the background remaining after background was subtracted.
-- Dye bias is by definition what dye bias correction removes. Measured after
-  `D` it is near-corrected and nearly uninformative.
-- Channel switch counts must come after `C`, which produces them.
+| statistic | measured | why not later | evidence |
+|---|---|---|---|
+| Infinium-I channel switches | **before `C`** | `C` resolves the disagreement the statistic counts | 65 R→G and 904 G→R before `C`; 0 and 0 after |
+| dye bias (`RGratio`, `RGdistort`) | after `C`, before `D` | `D` corrects dye bias by definition | `RGratio` 1.512 → 0.999 across `D` |
+| out-of-band intensity | after `C`, before `B` | `noob` subtracts background; these *are* background | `mean_oob_red` 545 → 278 across `B` |
+| mean intensity | after `C`, before `D`/`B` | absolute scale shifts under `noob` | see below |
+| probe counts by type | after `C` | they should reflect the corrected channel assignment | `num_probes_IR` 92,192 → 93,031 |
 
-sesame's own detection statistic group is **not** used, because
-`sesameQC_calcStats_detection` calls `pOOBAH()` directly at `R/QC.R:207`.
-Under this design that would be a third detection pass per sample and would
-contradict ELBAR everywhere else. Detection metrics are computed from the
-ELBAR p-values already in hand.
+The channel-switch placement is a correction. methylQC 3.0.1 measured the whole
+group after `C`, on the stated reasoning that "`C` produces them". It does not
+— it *consumes* them. `sesameQC_calcStats(sdf, "channel")` calls
+`inferInfiniumIChannel(sdf, summary = TRUE)`, which re-infers the channel and
+counts probes disagreeing with the declared one. After `C` the declared channel
+has already been set to the inferred one, so the off-diagonal counts are zero
+for every sample and the diagonal counts reproduce `num_probes_IR` and
+`num_probes_IG` exactly. Four of the eighteen recorded columns were therefore
+constant or duplicated in every 3.0.1 run.
 
-Consequence for existing thresholds: `intmin = 1300` in v2 was calibrated
-against intensity measured after the full `QCDPB` chain. The v3 quantity is
-different, so both `mean_intensity_raw` and the corrected value are recorded
-and the threshold applies to the raw one.
+Mean intensity is the weakest of the four constraints, and the claim made for
+it in 3.0.1 was overstated. Scaling an array to 75, 50, 25 and 10 per cent of
+its signal is recovered as 0.750, 0.500, 0.250 and 0.100 before `noob` and
+0.751, 0.503, 0.254 and 0.105 after, so the cohort-relative MAD rule in section
+4.3 would detect a degraded array from either measurement point. What `noob`
+changes is the absolute level, by about 10 per cent — and `intfloor` is an
+absolute threshold, so the uncorrected scale is the one it can be calibrated
+against. That is the reason to measure early, not an appeal to the metric being
+otherwise meaningless.
+
+Nothing here interacts with the detection ordering in section 2.2. ELBAR
+neither consumes nor produces any of these statistics, and none of them feed
+ELBAR, so moving detection after `noob` leaves every measurement point above
+unchanged.
 
 ### 4.2 Call rate
 
