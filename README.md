@@ -9,6 +9,12 @@ estimates cell composition and epigenetic age, and writes a QC report. Nothing
 is deleted — samples and probes are flagged, and you apply your own exclusions
 downstream.
 
+Everything a run produces goes into one output directory, organised into
+subdirectories: the matrices under `data/matrices/`, the per-sample table and
+sidecar CSVs under `data/metadata/`, the report under `qc/`, and the log under
+`logs/`. You rarely need to know those paths — the functions below take the
+output directory and find what they need.
+
 See [METHODS.md](METHODS.md) for what the pipeline does and why.
 
 ---
@@ -20,11 +26,8 @@ install.packages("pak")
 pak::pkg_install("brianchengithub/methylQC")
 ```
 
-On first use, cache the sesame annotation once:
-
-```r
-sesameData::sesameDataCache()
-```
+That is all — `pak` resolves sesame and the other Bioconductor dependencies,
+and the annotation data is downloaded automatically on the first run.
 
 **macOS and Linux only** — parallelism uses forking.
 
@@ -35,73 +38,60 @@ sesameData::sesameDataCache()
 ```r
 library(methylQC)
 
-pipeline("~/idats", "~/qcout")
+pipeline(
+  indir  = "/path/to/idat/directory",
+  outdir = "/path/to/output/directory"
+)
 ```
 
-One call does everything. It finds the IDATs and your sample sheet, sizes the
-run against available memory, processes every array, and writes the report.
+One call does everything: finds the IDATs and your sample sheet, sizes the run
+against available memory, processes every array, and writes the report. It
+prints a summary at the end, and names every flagged sample and its reason in
+the console and the log.
+
+**What you get:**
 
 ```
-methylQC complete - ~/qcout
-
-  Platform                  : EPIC, 866,553 probes
-  Samples                   : 240 processed, 1 failed
-  Stage 1 time              : 18.4 min
-
-  Flagged samples           : 7
-      low call rate         : 3
-      low intensity         : 2
-      sex mismatch          : 2
-      MDS outlier           : 0
-
-  Report    : ~/qcout/qc/qc_plots.pdf
-  Sheet     : ~/qcout/data/metadata/sample_sheet.csv
-  Methods   : ~/qcout/METHODS.txt
-  Log       : ~/qcout/logs/pipeline.log
-```
-
-Flagged sample IDs and their reasons are printed to the console and the log.
-
-To see the memory plan without committing to a run:
-
-```r
-qcplan("~/idats")
-```
-
-**Output:**
-
-```
-~/qcout/
+/path/to/output/directory/
   METHODS.txt                          what was done, with this run's numbers
-  logs/pipeline.log
-  data/matrices/
-    betas_all.rds                      beta values, UNMASKED, all probes
-    detP_all.rds                       detection p-values, all probes
-    design_mask.rds                    named logical vector, platform-level
-    snp_betas.rds                      rs probe betas
-  data/metadata/
-    sample_sheet.csv                   one row per sample, every metric and flag
-    failed_samples.csv, failed_probes.csv, pc_scores.csv, snp_concordance.csv
+  logs/
+    pipeline.log                       every decision the run made
+  data/
+    matrices/
+      betas_all.rds                    beta values, UNMASKED, all probes
+      detP_all.rds                     detection p-values, all probes
+      design_mask.rds                  named logical vector, platform-level
+      snp_betas.rds                    rs probe betas
+    metadata/
+      sample_sheet.csv                 one row per sample, every metric and flag
+      failed_samples.csv               arrays that could not be processed
+      failed_probes.csv                probes failing in many samples
+      pc_scores.csv
+      snp_concordance.csv
   qc/
     qc_plots.pdf                       the report
     qccache.rds                        lets qcplots() redraw without reprocessing
 ```
 
+Useful arguments to `pipeline()`:
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `platform` | inferred | force the array type, e.g. `"EPIC"`, `"EPICv2"`, `"HM450"` |
+| `sheet` | auto-detected | path to a sample sheet, if it is not found automatically |
+| `workers` | from preflight | forked worker processes |
+| `batch` | from preflight | samples per task |
+| `extreme` | `FALSE` | never hold a full matrix, for cohorts that will not fit in memory |
+
 ---
 
 ## 2. Redraw the report at a different threshold
 
-No reprocessing — this reads `qccache.rds` only and takes about a second.
+No reprocessing. This reads `qccache.rds` only and takes about a second.
 
 ```r
-qcplots("~/qcout", detp = 0.01)                  # redraw at a new threshold
-qcplots("~/qcout", detp = 0.01, dry = TRUE)      # what would this cost?
-qcplots("~/qcout", detp = 0.01, suffix = "d01")  # side by side, nothing overwritten
+qcplots("/path/to/output/directory", detp = 0.01)
 ```
-
-Tunable here: `detp`, `samplemin`, `failmin`, `intmad`, `intfloor`, `inclqual`.
-Without `suffix`, `sample_sheet.csv` is updated to match so the report and the
-sheet cannot disagree.
 
 Point it at a **parent folder** to do every project beneath it at once:
 
@@ -109,86 +99,88 @@ Point it at a **parent folder** to do every project beneath it at once:
 qcplots("~/projects", detp = 0.01)
 ```
 
----
+Everything you can change:
 
-## 3. Apply masks for downstream work
+| Argument | Default | Accepts | Meaning |
+|---|---|---|---|
+| `detp` | `0.05` | 0–1 | detection p-value above which a probe is called failed |
+| `samplemin` | `0.95` | 0–1 | call rate below which a sample is flagged |
+| `failmin` | `0.05` | 0–1 | probe failure rate above which a probe is listed and marked |
+| `intmad` | `3` | 0–20 | MADs below the cohort median before a sample is a low-intensity outlier |
+| `intfloor` | `1300` | number or `NA` | absolute intensity floor; a **whole-cohort warning only**, `NA` disables |
+| `inclqual` | `FALSE` | `TRUE`/`FALSE` | include design-masked probes in the probe-failure panel |
 
-Nothing on disk is masked. The design mask and the detection p-values are
-stored separately, so you choose the policy at the point of use:
-
-```r
-betas <- readRDS("~/qcout/data/matrices/betas_all.rds")
-detp  <- readRDS("~/qcout/data/matrices/detP_all.rds")
-dm    <- readRDS("~/qcout/data/matrices/design_mask.rds")
-
-clean <- cleanmat(betas, detp, dm, maskuse = "both")   # design + detection
-m     <- mvals(clean)                                   # M-values for an EWAS
-```
-
-`maskuse` is `"both"`, `"detection"`, `"design"` or `"none"`. Masked cells
-become `NA`; no probe or sample is removed.
-
-Drop the samples that failed QC:
-
-```r
-ss   <- read.csv("~/qcout/data/metadata/sample_sheet.csv")
-keep <- ss$sample_id[!ss$flagged]
-m    <- m[, keep]
-```
+The sample sheet is rewritten to match, so the report and the CSV cannot
+disagree about how many samples failed.
 
 ---
 
-## 4. Harmonise EPIC v2 for clocks and reference panels
+## 3. Load masked betas for downstream work
+
+Nothing on disk is masked, so you pick the policy when you use the data. Give
+the output directory and say which masks you want — the matrices are found,
+read and combined for you:
+
+```r
+b <- loadbetas("/path/to/output/directory", maskuse = "both")
+```
+
+| `maskuse` | Applies |
+|---|---|
+| `"both"` (default) | design mask **and** detection p-values |
+| `"detection"` | detection p-values only |
+| `"design"` | design mask only |
+| `"none"` | nothing; the stored matrix as-is |
+
+Masked cells become `NA`. No probe or sample is removed unless you ask:
+
+```r
+m <- loadbetas("/path/to/output/directory",   # M-values, QC failures removed,
+               mvals = TRUE,                   # ready for an EWAS
+               dropflagged = TRUE)
+```
+
+A **parent folder** returns one matrix per project, named by relative path:
+
+```r
+all <- loadbetas("~/projects")
+names(all)     # "cohortA/out"  "cohortB/out"  "pilot/out"
+```
+
+---
+
+## 4. Harmonise EPIC v2 to EPIC v1
 
 EPIC v2 measures some CpGs with several probes, distinguished by a suffix
 (`cg00004963_TC21`). Epigenetic clocks and cell-type reference panels key on
 bare `cg` identifiers and match nothing until those are resolved.
 
-`pipeline()` does this automatically when it sees the suffixes, so
-`betas_all.rds` from an EPIC v2 run is already harmonised. To do it yourself to
-a matrix from elsewhere:
+`collapsev2()` is the single function that does this. It reduces each replicate
+group to one probe — keeping the one Peters et al. (2024) found performs best
+against matched EPIC v1 and whole-genome bisulphite data — and renames the rows
+to bare `cg` identifiers, so the result is EPIC v1 compatible in both content
+and naming. Betas, detection p-values and the design mask are collapsed
+together, so they cannot drift apart.
+
+**`pipeline()` already does this** whenever it sees the suffixes, so
+`betas_all.rds` from an EPIC v2 run is already harmonised and needs nothing
+further. To harmonise a matrix from elsewhere:
 
 ```r
-cv    <- collapsev2(betas, detp, dm)   # one row per CpG, bare cg identifiers
-betas <- cv$betas                       # betas, detp and the mask collapse together
+cv <- collapsev2(betas, detp, dm)
+betas <- cv$betas      # one row per CpG, bare cg identifiers
 ```
 
-The default keeps the probe recommended by Peters et al. (2024). That table is
-not shipped; build it once, then reinstall:
+The Peters table is derived from the `EPICv2manifest` annotation package, which
+methylQC does not redistribute. Build it once, then reinstall:
 
 ```r
 pak::pkg_install("bioc::EPICv2manifest")
 methylQC::build_epicv2_table()      # from the package source directory
 ```
 
-Until then it falls back to `"minpval"` with a warning.
-
----
-
-## Options
-
-```r
-mqcopts()                    # current
-mqcdefaults()                # factory
-mqcset(detp = 0.01)          # change
-mqcreset()                   # revert
-```
-
-| Option | Default | Meaning |
-|---|---|---|
-| `detp` | `0.05` | detection p-value threshold |
-| `samplemin` | `0.95` | minimum call rate |
-| `intmad` | `3` | MAD multiplier for intensity outliers |
-| `intfloor` | `1300` | absolute floor, cohort-level **warning only** |
-| `failmin` | `0.05` | probe failure rate above which a probe is listed |
-| `mdssd` | `4` | SDs from the MDS centroid before a sample is an outlier |
-| `maskuse` | `"both"` | which masks `cleanmat()` applies |
-| `savesdf` | `TRUE` | retain SigDFs; withdrawn automatically if too large |
-| `extreme` | `FALSE` | never hold a full matrix, for cohorts that will not fit |
-| `dishref` / `dishmethod` | `"blood"` / `"RPC"` | EpiDISH settings |
-
-`mqcdefaults()` lists the rest, including the sex-calling and sample-sheet
-options.
+Until then `collapsev2()` falls back to keeping the replicate with the lowest
+median detection p-value, and says so.
 
 ---
 

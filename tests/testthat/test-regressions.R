@@ -812,3 +812,59 @@ test_that("the design mask is a platform property, identical for every sample", 
   expect_gt(sum(dm), 1e5)
   expect_equal(dm, designmask(sesame::prepSesame(sdf, "C")))
 })
+
+test_that("loadbetas finds, reads and masks a run from its path", {
+  d <- file.path(tempdir(), paste0("lb", as.integer(runif(1) * 1e6)))
+  on.exit(unlink(d, recursive = TRUE))
+  ids <- paste0("cg", 1:20); sid <- paste0("s", 1:4)
+  b <- matrix(0.5, 20, 4, dimnames = list(ids, sid))
+  dp <- matrix(0.001, 20, 4, dimnames = dimnames(b)); dp[1:3, ] <- 0.9
+  dm <- stats::setNames(rep(FALSE, 20), ids); dm[19:20] <- TRUE
+
+  dir.create(dirname(mqcpath(d, "betas")), recursive = TRUE)
+  dir.create(dirname(mqcpath(d, "sheet")), recursive = TRUE)
+  saveRDS(b, mqcpath(d, "betas")); saveRDS(dp, mqcpath(d, "detp"))
+  saveRDS(dm, mqcpath(d, "designmask"))
+  utils::write.csv(data.frame(sample_id = sid, flagged = c(FALSE, FALSE, TRUE, FALSE)),
+                   mqcpath(d, "sheet"), row.names = FALSE)
+
+  expect_equal(sum(is.na(loadbetas(d, maskuse = "none"))), 0L)
+  expect_equal(sum(is.na(loadbetas(d, maskuse = "detection"))), 3L * 4L)
+  expect_equal(sum(is.na(loadbetas(d, maskuse = "design"))), 2L * 4L)
+  expect_equal(sum(is.na(loadbetas(d, maskuse = "both"))), 5L * 4L)
+
+  expect_equal(ncol(loadbetas(d, dropflagged = TRUE)), 3L)
+  expect_true(all(loadbetas(d, maskuse = "none", mvals = TRUE) == 0))
+})
+
+test_that("loadbetas walks a parent and names runs by relative path", {
+  root <- file.path(tempdir(), paste0("lbp", as.integer(runif(1) * 1e6)))
+  on.exit(unlink(root, recursive = TRUE))
+  ids <- paste0("cg", 1:10)
+  mk <- function(p) {
+    d <- file.path(root, p)
+    dir.create(dirname(mqcpath(d, "betas")), recursive = TRUE)
+    saveRDS(matrix(0.5, 10, 2, dimnames = list(ids, c("a", "b"))),
+            mqcpath(d, "betas"))
+    d
+  }
+  mk("projA/out"); mk("projB/out"); mk("nested/deep/projC/out")
+
+  got <- loadbetas(root, maskuse = "none")
+  expect_length(got, 3L)
+  ## All three output directories are called "out"; the names must still differ.
+  expect_equal(sort(names(got)),
+               c("nested/deep/projC/out", "projA/out", "projB/out"))
+  expect_true(all(vapply(got, function(x) identical(dim(x), c(10L, 2L)), logical(1))))
+})
+
+test_that("loadbetas refuses a mask whose input is missing, rather than skipping it", {
+  d <- file.path(tempdir(), paste0("lbm", as.integer(runif(1) * 1e6)))
+  on.exit(unlink(d, recursive = TRUE))
+  dir.create(dirname(mqcpath(d, "betas")), recursive = TRUE)
+  saveRDS(matrix(0.5, 5, 2, dimnames = list(paste0("cg", 1:5), c("a", "b"))),
+          mqcpath(d, "betas"))
+  expect_error(loadbetas(d, maskuse = "detection"), "detP_all.rds")
+  expect_error(loadbetas(d, maskuse = "design"), "design_mask.rds")
+  expect_silent(loadbetas(d, maskuse = "none"))
+})

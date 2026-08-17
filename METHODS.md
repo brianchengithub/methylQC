@@ -259,6 +259,32 @@ treated as having passed.
 
 ---
 
+
+### 3.1 Where the design mask is and is not applied
+
+The design mask is stored, never baked in. Section 2.3 shows that prepending
+`Q` to the prep string changes nothing about preprocessing, so nothing is lost
+by omitting it — but the mask itself is used, in the places where it belongs.
+Collected in one table so the accounting is visible:
+
+| step | design mask | why |
+|---|---|---|
+| dye bias (`D`), noob (`B`), ELBAR | **not applied** | all three ignore `sdf$mask` by construction; applying it changes no number (section 2.3) |
+| stored beta matrix | **not applied** | `getBetas(mask = FALSE)`; the mask ships alongside as `design_mask.rds` so no value is destroyed |
+| stored detection matrix | **not applied** | p-values are kept for every probe so any threshold can be applied later |
+| PCA and MDS input | **applied** | design-problem probes are structured noise and would drive components (section 5) |
+| probe-failure panel | **applied**, unless `inclqual = TRUE` | a probe that is masked by design is not evidence about this cohort's detection |
+| mean intensity statistic | **not applied** | the shift is uniform across samples and the rule is cohort-relative (section 2.3) |
+| sex calling | **not applied** | uses curated chrX/chrY probe lists that were selected independently |
+| epigenetic age | **not applied** | 8 of the 334 Horvath probes on EPIC are design-masked; dropping them shrinks a published model (section 7) |
+| cell composition | **not applied** | 15 of the 315 EpiDISH blood reference probes are design-masked; same reasoning |
+| `cleanmat()` / `loadbetas()` | **caller's choice** | `maskuse` is `"both"`, `"detection"`, `"design"` or `"none"` |
+
+The through-line: the mask is applied wherever methylQC is making a judgement
+of its own, and withheld wherever a published model or the stored data is at
+stake. Anything withheld is recoverable, because the mask is a separate
+object.
+
 ## 4. Quality metrics
 
 ### 4.1 Where each statistic is measured
@@ -345,10 +371,69 @@ intensity distribution.
 
 ### 4.4 Failures fail closed
 
-Any sample that cannot be processed is recorded in `failed_samples.csv`, kept
-in the sample sheet with missing values, given an all-failed detection
-profile, and flagged. A sample that could not be assessed should look
-maximally suspect, never perfect.
+**"Failed" here means one thing only: the array could not be processed at
+all.** `process_one()` wraps the read-and-preprocess of one IDAT pair in a
+handler that never throws, so a corrupt file, a truncated scan, an unreadable
+manifest or an error inside sesame is caught, recorded, and the cohort
+continues. The sample appears in `failed_samples.csv` with the error message,
+and it keeps its row in the sample sheet with missing values rather than
+vanishing.
+
+This is a different and much rarer thing than *failing QC*. A sample with a
+call rate of 0.80 processed perfectly well; it is flagged, not failed.
+
+**What "an all-failed detection profile" means.** A failed sample produced no
+p-values at all — there is nothing to put in its column of the detection
+matrix. The pipeline fills that gap with the worst possible values instead of
+leaving it empty: every probe is recorded as having failed detection, so the
+sample's call rate computes to 0 and its column of the beta matrix is `NA`
+throughout. Concretely, its p-value histogram is set to all-probes-in-the-
+top-bin and its contribution to the per-probe failure counts is incremented
+everywhere.
+
+The alternative — leaving the column absent, or `NA`, and letting downstream
+code use `na.rm = TRUE` — is how a sample that was never measured ends up with
+a call rate of 1.00. That is the defect this replaces: v2 computed
+`colMeans(detP <= pthresh, na.rm = TRUE)`, which removes missing probes from
+the denominator as well as the numerator, so a sample with half its p-values
+missing scored a perfect 1.00 and a sample with all of them missing scored
+`NA`, which then propagated into the flagged-samples CSV as a literal `<NA>`
+row while never flagging the real sample.
+
+The principle applies wherever a value could not be computed: an unmeasurable
+intensity is a flag, an `NA` detection p-value is a failed probe rather than a
+passing one, and a `NA` call rate is a failed sample. A sample that could not
+be assessed must look maximally suspect, never perfect.
+
+### 4.5 A flag is not an exclusion, and flags are independent
+
+Nothing is removed. `flagged` is a summary column for convenience; every
+constituent flag stays in the sample sheet as its own column, and the analyst
+decides what to do with each.
+
+This matters because **the flags are computed independently and can legitimately
+disagree**. A sample flagged only for call rate has still been fully
+preprocessed: its betas are real numbers, its sex-chromosome intensities were
+measured, and EpiDISH ran on it like any other. If its sex call matches the
+reported sex and its cell composition looks ordinary, that is genuine
+information, not an artefact — a modest excess of undetected probes does not
+invalidate the ~95% that did detect, and both the sex call and the
+deconvolution rest on small, well-behaved probe sets that may be entirely
+intact.
+
+So a low call rate is a reason to look, not a verdict. Common readings:
+
+| pattern | likely meaning |
+|---|---|
+| low call rate, everything else normal | some probe-level dropout; usable for most purposes, and the sex and composition estimates are informative |
+| low call rate **and** low intensity | genuinely weak array; treat the whole sample with suspicion |
+| low call rate **and** sex mismatch | look for a swap or a mix before blaming the array |
+| MDS outlier alone | not necessarily bad quality — check whether it tracks a batch or a tissue on the PC pages before excluding |
+
+The one flag deliberately excluded from `flagged` is `age_outlier`, which
+describes the reported metadata distribution rather than array quality;
+excluding on it would discard sound arrays from an age-skewed cohort. It is
+still reported in `flag_reason` and listed separately in the console output.
 
 ---
 
@@ -443,14 +528,73 @@ probes exceed 0.70 and the remainder average below 0.30 — and this holds
 regardless of background correction or normalisation, including on raw data.
 For most probes a fitted calibration would be regressing noise on noise.
 
-Betas, p-values and the design mask are collapsed together in one operation
-keyed on the same group membership, so they cannot disagree afterwards. v2
-collapsed only the beta matrix, leaving the mask and detection lookups keyed
-on suffixed identifiers that no longer matched; both returned entirely `NA`
-and the run applied no quality control at all while producing files of the
-correct shape.
+### 6.1 How the collapse is performed
 
----
+`collapsev2()` is the single operation. Betas, detection p-values and the
+design mask are collapsed together, keyed on the same group membership, so
+they cannot disagree afterwards. v2 collapsed only the beta matrix, leaving
+the mask and detection lookups keyed on suffixed identifiers that no longer
+matched; both returned entirely `NA` and the run applied no quality control at
+all while producing files of the correct shape.
+
+Step by step:
+
+1. **Group.** `stripv2()` removes the replicate suffix with the regular
+   expression `_[A-Z]{2}[0-9]{2}$`, so `cg00004963_TC21` becomes
+   `cg00004963`. The pattern is deliberately narrow: `rs9363764` and
+   `ch.2.1234F` are returned unchanged, and the function is therefore safe to
+   apply to any platform. Probe identifiers are split on the stripped key.
+2. **Select one row per group.** Groups of size one pass through untouched.
+   For the rest, `method` decides:
+   - `"peters"` (default) looks the group up in the frozen table and keeps the
+     recommended probe. If the group is absent from the table, it falls back
+     to `"minpval"` for that group alone and records the fallback.
+   - `"minpval"` keeps the replicate with the lowest median detection p-value
+     across samples — the brightest probe, which answers a different question
+     from which is most accurate, hence its status as a fallback.
+   - `"mean"` averages the replicates. Available, not recommended: probe
+     design affects hybridisation, so an average of two designs corresponds to
+     neither.
+3. **Apply the same selection to everything.** The chosen row index is used to
+   subset the beta matrix, the detection matrix and the design mask alike.
+   Under `"mean"`, betas and p-values are averaged and a collapsed probe is
+   design-masked only if *every* replicate was.
+4. **Rename.** Output row names are the stripped keys, so the matrix leaves
+   the function with bare `cg` identifiers — the EPICv1 naming that clocks and
+   reference panels expect.
+5. **Report.** A count of groups taking each path (`single`, `peters`,
+   `minpval_fallback`, `mean`) is returned and written to the log.
+
+### 6.2 The Peters table
+
+The recommendations come from Peters et al. (2024, BMC Genomics 25:251), who
+evaluated every EPICv2 replicate group against matched EPICv1 and whole-genome
+bisulphite sequencing data and published, per group, which probe performs
+best.
+
+methylQC does **not** ship that table, because it is derived from the
+`EPICv2manifest` annotation package and redistributing it would fork it.
+`build_epicv2_table()` derives it once and writes
+`inst/extdata/epicv2_replicates.rds`:
+
+- It restricts the manifest to probes that actually have replicates, using the
+  `namerep` column when present and falling back to duplicated `Name` values.
+- It locates the recommendation column by pattern rather than by a hard-coded
+  name — `sensitivity`, `precision`, `rep_result`, `posrep`, `superior` — since
+  the exact name has moved between annotation releases.
+- It picks, per group, the probe maximising that column when it is numeric, or
+  the first flagged `Y`/`TRUE`/`1` when it is categorical, and falls back to
+  manifest order otherwise.
+
+The stored table has one row per replicate group with columns `group` (the
+stripped identifier), `chosen` (the full EPICv2 `IlmnID` to keep),
+`criterion` (which manifest column was used) and `built` (the date). Freezing
+it at build time is the point: an annotation update cannot silently change
+results for an analysis that has already been run, and `criterion` records
+which release's column the choice came from.
+
+Until the table is built, `collapsemethod = "peters"` falls back to
+`"minpval"` with a warning, for the whole matrix rather than silently.
 
 ## 7. Epigenetic age
 
@@ -682,7 +826,74 @@ and `makemat()` reassembles them later.
 
 ---
 
-## 12. Known limits
+## 12. Options
+
+Every option, its default and its effect. `mqcopts()` returns the current
+values, `mqcset()` changes them, `mqcreset()` restores the defaults. Passing
+`NULL` to `mqcset()` restores that one option.
+
+**Detection and masking**
+
+| Option | Default | Effect |
+|---|---|---|
+| `detp` | `0.05` | ELBAR p-value above which a probe is called failed |
+| `maskuse` | `"both"` | which masks `cleanmat()` and `loadbetas()` apply |
+| `inclqual` | `FALSE` | include design-masked probes in the probe-failure panel |
+
+**Sample-level thresholds**
+
+| Option | Default | Effect |
+|---|---|---|
+| `samplemin` | `0.95` | call rate below which a sample is flagged |
+| `intmad` | `3` | MADs below the cohort median of log2 intensity before a sample is flagged |
+| `intfloor` | `1300` | absolute intensity floor; whole-cohort warning only, `NA` disables |
+| `failmin` | `0.05` | probe failure rate above which a probe is listed |
+| `mdssd` | `4` | SDs from the MDS centroid before a sample is an outlier |
+
+**Sex calling** (section 8)
+
+| Option | Default | Effect |
+|---|---|---|
+| `sexsep` | `1.0` | separation floor below which the cohort is declared unimodal and no sex is called |
+| `sexcutsd` | `4` | trim width for the high-confidence female set, in MADs; selects who defines the boundary, not the boundary |
+| `sexmin` | `8` | cohort size below which no sex is called |
+
+**EPICv2** (section 6)
+
+| Option | Default | Effect |
+|---|---|---|
+| `collapse` | `NA` | `NA` decides from the probe identifiers; `TRUE`/`FALSE` force it |
+| `collapsemethod` | `"peters"` | `"peters"`, `"minpval"` or `"mean"` |
+
+**Cell composition and identity**
+
+| Option | Default | Effect |
+|---|---|---|
+| `dishref` | `"blood"` | `"blood"`, `"bloodsub"`, `"epithelial"`, `"epifibfat"`, `"12ct"` |
+| `dishmethod` | `"RPC"` | `"RPC"`, `"CBS"` or `"CP"` |
+| `snpmin` | `0.70` | concordance below which an unrelated sample pair is not reported |
+
+**Compute** (sections 10 and 11)
+
+| Option | Default | Effect |
+|---|---|---|
+| `workers` | `NULL` | forked processes; `NULL` inherits from the preflight |
+| `batch` | `NULL` | samples per task; `NULL` inherits from the preflight |
+| `memfrac` | `0.80` | fraction of available RAM the run may use |
+| `savesdf` | `TRUE` | retain SigDFs; the preflight withdraws it when they will not fit |
+| `extreme` | `FALSE` | never hold a full matrix |
+
+**Sample sheet resolution** (section 4)
+
+`sheetpatterns` is the tiered filename search, strictest first. `idcol`,
+`sexcol`, `agecol`, `batchcol`, `donorcol` and `cellcol` name the preferred
+column for each role, and the matching `*aliases` vectors list the alternatives
+accepted. Each is confirmed against the column's own values before being used,
+so an unexpected header still resolves and a misleading one is rejected.
+
+---
+
+## 13. Known limits
 
 - Parallel execution is unavailable on Windows.
 - `collapsemethod = "peters"` requires `build_epicv2_table()` to have been run

@@ -354,20 +354,42 @@ prep <- function(dir, s1 = NULL, cols = NULL, info = NULL, collapse = NULL,
 #' @return a character vector of output directories.
 #' @keywords internal
 #' @noRd
-.find_outdirs <- function(dir) {
+.find_outdirs <- function(dir, key = c("cache", "betas")) {
+  key <- match.arg(key)
   if (!dir.exists(dir)) stop("directory does not exist: ", dir, call. = FALSE)
-  if (file.exists(mqcpath(dir, "cache"))) return(dir)
+  if (file.exists(mqcpath(dir, key))) return(dir)
 
-  hits <- list.files(dir, pattern = "^qccache\\.rds$", recursive = TRUE,
-                     full.names = TRUE)
-  hits <- hits[basename(dirname(hits)) == "qc"]
-  found <- unique(dirname(dirname(hits)))
+  ## The layout table is the authority on how deep the key sits, so this works
+  ## for qc/qccache.rds and data/matrices/betas_all.rds alike rather than
+  ## assuming a fixed nesting.
+  rel <- .MQC_LAYOUT[[key]]
+  hits <- list.files(dir, recursive = TRUE, full.names = TRUE,
+                     pattern = paste0("^", gsub("\\.", "\\\\.",
+                                                rel[length(rel)]), "$"))
+  ## Match the whole relative path, not just the file name: a stray file of the
+  ## right name somewhere else in the tree is not a methylQC run.
+  ok <- vapply(hits, function(h) {
+    parts <- strsplit(h, .Platform$file.sep, fixed = TRUE)[[1]]
+    length(parts) >= length(rel) &&
+      identical(utils::tail(parts, length(rel)), rel)
+  }, logical(1))
+  hits <- hits[ok]
+  found <- unique(unname(vapply(hits, function(h) {
+    for (i in seq_along(rel)) h <- dirname(h)
+    h
+  }, character(1))))
+
+  if (identical(key, "betas")) {
+    if (!length(found))
+      stop("no methylQC Stage 1 output found under '", dir, "'. Looked for ",
+           paste(rel, collapse = "/"), ".", call. = FALSE)
+    return(sort(found))
+  }
 
   if (!length(found)) {
     ## Distinguish "nothing here" from "processed but Stage 2 never ran", which
     ## is a different fix.
-    s1 <- list.files(dir, pattern = "^betas_all\\.rds$", recursive = TRUE,
-                     full.names = TRUE)
+    s1 <- tryCatch(.find_outdirs(dir, "betas"), error = function(e) character(0))
     if (length(s1))
       stop(length(s1), " directory/directories under '", dir, "' hold Stage 1 ",
            "output but no QC cache. Run prep() on them first; qcplots() only ",
