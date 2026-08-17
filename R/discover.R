@@ -69,29 +69,7 @@ discover <- function(indir, recursive = TRUE, sheet = NULL, logger = NULL) {
   out$detected_platform <- .detect_platform(base, batch, logger)
 
   ss <- .read_sheets(indir, sheet, cfg, logger)
-  if (!is.null(ss) && nrow(ss)) {
-    key <- .resolve_col(ss, c(cfg$idcol, cfg$idaliases))
-    if (!is.na(key)) {
-      ss$.join <- as.character(ss[[key]])
-      m <- match(out$sentrix, ss$.join)
-      m2 <- match(out$sample_id, ss$.join)
-      m[is.na(m)] <- m2[is.na(m)]
-      extra <- setdiff(names(ss), c(".join", names(out)))
-      for (cl in extra) out[[cl]] <- ss[[cl]][m]
-      hit <- sum(!is.na(m))
-      logger$log("discover",
-                 sprintf("sample sheet matched %d of %d samples on column '%s'",
-                         hit, nrow(out), key))
-      if (hit == 0L)
-        logger$log("discover",
-                   "sample sheet matched NO samples; check the identifier column",
-                   warn = TRUE)
-    } else {
-      logger$log("discover",
-                 "no usable identifier column found in the sample sheet",
-                 warn = TRUE)
-    }
-  }
+  if (!is.null(ss) && nrow(ss)) out <- .join_sheet(out, ss, cfg, logger)
 
   logger$log("discover", sprintf("%d samples across %d batch folder(s)",
                                  nrow(out), length(unique(out$batch_folder))))
@@ -141,40 +119,148 @@ discover <- function(indir, recursive = TRUE, sheet = NULL, logger = NULL) {
     list.files(indir, pattern = cfg$sheetpattern, recursive = TRUE,
                full.names = TRUE)
   files <- files[file.exists(files)]
-  if (!length(files)) return(NULL)
+  if (!length(files)) {
+    logger$log("discover", paste(
+      "no sample sheet found. Looked for files matching the 'sheetpattern'",
+      "option; pass sheet= explicitly if yours is named differently."),
+      warn = TRUE)
+    return(NULL)
+  }
 
   frames <- lapply(files, function(f) {
-    ext <- tolower(tools::file_ext(f))
-    df <- tryCatch({
-      if (ext %in% c("xlsx", "xls")) {
-        if (!have_pkg("readxl", "reading Excel sample sheets", logger)) return(NULL)
-        as.data.frame(readxl::read_excel(f), stringsAsFactors = FALSE)
-      } else if (ext %in% c("tsv", "txt")) {
-        utils::read.delim(f, stringsAsFactors = FALSE, check.names = FALSE)
-      } else {
-        .read_illumina_csv(f)
-      }
-    }, error = function(e) {
+    df <- tryCatch(.read_table(f, logger), error = function(e) {
       logger$log("discover", sprintf("could not read %s: %s", basename(f),
                                      conditionMessage(e)), warn = TRUE)
       NULL
     })
+    if (is.null(df) || !nrow(df)) return(NULL)
+    ## A broad filename pattern will pick up unrelated text files, so keep only
+    ## tables that actually look like a sample annotation.
+    if (is.na(.resolve_col(df, c(cfg$idcol, cfg$idaliases)))) {
+      logger$log("discover", sprintf(
+        "ignoring %s: no recognisable sample identifier column (%s)",
+        basename(f), paste(utils::head(names(df), 6), collapse = ", ")))
+      return(NULL)
+    }
+    logger$log("discover", sprintf("read %s: %d row(s), %d column(s)",
+                                   basename(f), nrow(df), ncol(df)))
     df
   })
-  frames <- Filter(function(d) !is.null(d) && nrow(d) > 0, frames)
+  frames <- Filter(Negate(is.null), frames)
   if (!length(frames)) return(NULL)
+  if (length(frames) == 1L) return(frames[[1]])
 
   common <- Reduce(intersect, lapply(frames, names))
   if (!length(common)) return(frames[[1]])
   do.call(rbind, lapply(frames, function(d) d[, common, drop = FALSE]))
 }
 
-## Illumina sample sheets carry a [Data] header block before the real table.
-.read_illumina_csv <- function(f) {
+## Read one annotation table, whatever shape it arrives in: Excel, or delimited
+## text with the separator inferred rather than assumed. 3.0.x sent every .txt
+## through read.delim(), so a space- or semicolon-separated file parsed as a
+## single column and was silently useless.
+.read_table <- function(f, logger = NULL) {
+  logger <- logger %||% nulllog()
+  ext <- tolower(tools::file_ext(f))
+  if (ext %in% c("xlsx", "xls")) {
+    if (!have_pkg("readxl", "reading Excel sample sheets", logger)) return(NULL)
+    return(as.data.frame(readxl::read_excel(f), stringsAsFactors = FALSE))
+  }
+
   ln <- readLines(f, warn = FALSE)
+  ln <- ln[nzchar(trimws(ln))]
+  if (!length(ln)) return(NULL)
+
+  ## Illumina sheets carry a [Data] block before the real table.
   hit <- grep("^\\s*\\[Data\\]", ln)
   skip <- if (length(hit)) hit[1] else 0L
-  utils::read.csv(f, skip = skip, stringsAsFactors = FALSE, check.names = FALSE)
+  hdr <- ln[skip + 1L]
+
+  sep <- .guess_sep(hdr)
+  utils::read.table(f, sep = sep, header = TRUE, skip = skip,
+                    stringsAsFactors = FALSE, check.names = FALSE,
+                    quote = "\"'", comment.char = "", fill = TRUE,
+                    na.strings = c("NA", "", "NaN", "n/a", "N/A", "#N/A"))
+}
+
+## Pick the delimiter that splits the header into the most fields.
+.guess_sep <- function(header) {
+  cand <- c("\t", ",", ";", "|")
+  n <- vapply(cand, function(s) length(strsplit(header, s, fixed = TRUE)[[1]]),
+              integer(1))
+  if (max(n) > 1L) return(cand[which.max(n)])
+  if (length(strsplit(trimws(header), "[[:space:]]+")[[1]]) > 1L) return("")
+  "\t"
+}
+
+## Attach the sheet's columns to the discovered samples.
+##
+## The identifier in a lab-made sheet is rarely the Sentrix barcode: it may be
+## the IDAT file name, a path, or Sentrix_ID and Sentrix_Position in separate
+## columns. Every plausible key is tried and the one that matches most samples
+## wins, so the user does not have to know which convention their sheet uses.
+.join_sheet <- function(out, ss, cfg, logger) {
+  key <- .resolve_col(ss, c(cfg$idcol, cfg$idaliases))
+  keys <- list()
+  if (!is.na(key)) keys[[key]] <- as.character(ss[[key]])
+
+  ## Sentrix_ID + Sentrix_Position, the Illumina convention.
+  sid <- .resolve_col(ss, c("Sentrix_ID", "SentrixID", "Slide", "Sentrix_Barcode"))
+  spo <- .resolve_col(ss, c("Sentrix_Position", "SentrixPosition", "Array", "Well"))
+  if (!is.na(sid) && !is.na(spo))
+    keys[["Sentrix_ID+Position"]] <- paste0(ss[[sid]], "_", ss[[spo]])
+
+  if (!length(keys)) {
+    logger$log("discover",
+               "no usable identifier column found in the sample sheet",
+               warn = TRUE)
+    return(out)
+  }
+
+  ## Candidate targets on our side, and a normaliser that strips directories,
+  ## IDAT suffixes and case so "…/200607130026_R06C01_Grn.idat" matches
+  ## "200607130026_R06C01".
+  norm <- function(x) {
+    x <- basename(as.character(x))
+    x <- sub("_(Grn|Red)\\.idat(\\.gz)?$", "", x, ignore.case = TRUE)
+    tolower(trimws(x))
+  }
+  targets <- list(sentrix = norm(out$sentrix),
+                  sample_id = norm(out$sample_id),
+                  basename = norm(out$Basename))
+
+  best <- list(n = -1L, m = NULL, key = NA_character_, target = NA_character_)
+  for (kn in names(keys)) {
+    kv <- norm(keys[[kn]])
+    for (tn in names(targets)) {
+      m <- match(targets[[tn]], kv)
+      n <- sum(!is.na(m))
+      if (n > best$n) best <- list(n = n, m = m, key = kn, target = tn)
+    }
+  }
+
+  if (best$n == 0L) {
+    logger$log("discover", sprintf(paste(
+      "sample sheet matched NO samples. Tried column(s) %s against the Sentrix",
+      "barcode, the sample id and the IDAT file name. Sheet ids look like '%s';",
+      "IDAT names look like '%s'."),
+      paste(names(keys), collapse = ", "),
+      as.character(keys[[1]])[1], out$sentrix[1]), warn = TRUE)
+    return(out)
+  }
+
+  drop <- c(names(out), sid, spo)
+  extra <- setdiff(names(ss), stats::na.omit(drop))
+  for (cl in extra) out[[cl]] <- ss[[cl]][best$m]
+  logger$log("discover", sprintf(
+    "sample sheet matched %d of %d samples (sheet column '%s' vs %s); added: %s",
+    best$n, nrow(out), best$key, best$target,
+    if (length(extra)) paste(extra, collapse = ", ") else "no new columns"))
+  if (best$n < nrow(out))
+    logger$log("discover", sprintf(
+      "%d sample(s) have no sample sheet row and will carry NA metadata",
+      nrow(out) - best$n), warn = TRUE)
+  out
 }
 
 #' Find the first matching column name in a data frame

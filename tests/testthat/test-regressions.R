@@ -192,3 +192,70 @@ test_that("the worker allowance is marginal, not the whole parent heap", {
   expect_gt(w, 100 * 2^20)             # not trivially small
   expect_lt(w, 400 * 2^20)             # and nowhere near the 1.5 GiB heap peak
 })
+
+test_that("a lab-style sheet named samples.<x>.txt is found and joined", {
+  ## Reported from a live run: a tab-delimited file named samples.BM.PH1.txt
+  ## with columns Age, Sex, Fname, Donor was never matched by the 3.0.x
+  ## sheetpattern, so the run proceeded with no metadata and no sex check.
+  d <- file.path(tempdir(), paste0("sh", as.integer(runif(1) * 1e6)))
+  dir.create(d, recursive = TRUE); on.exit(unlink(d, recursive = TRUE))
+  ids <- c("200607130026_R06C01", "200607130026_R07C01")
+  for (i in ids) for (ch in c("_Grn.idat", "_Red.idat"))
+    file.create(file.path(d, paste0(i, ch)))
+  utils::write.table(
+    data.frame(Fname = ids, Age = c(41, 62), Sex = c("F", "M"),
+               Donor = c("D1", "D2"), stringsAsFactors = FALSE),
+    file.path(d, "samples.BM.PH1.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
+
+  expect_match(basename(file.path(d, "samples.BM.PH1.txt")),
+               mqcdefaults()$sheetpattern, perl = TRUE)
+
+  ss <- data.frame(sample_id = ids, sentrix = ids,
+                   Basename = file.path(d, ids), stringsAsFactors = FALSE)
+  joined <- methylQC:::.join_sheet(
+    ss, methylQC:::.read_table(file.path(d, "samples.BM.PH1.txt")),
+    mqcdefaults(), methylQC:::nulllog())
+  expect_true(all(c("Age", "Sex", "Donor") %in% names(joined)))
+  expect_equal(joined$Sex, c("F", "M"))
+  expect_equal(joined$Age, c(41, 62))
+
+  cols <- checkmeta(joined, logger = methylQC:::nulllog())
+  expect_equal(cols$sex, "Sex")
+  expect_equal(cols$age, "Age")
+  expect_equal(cols$donor, "Donor")
+})
+
+test_that("the delimiter is inferred rather than assumed", {
+  g <- methylQC:::.guess_sep
+  expect_equal(g("Fname\tAge\tSex"), "\t")
+  expect_equal(g("Fname,Age,Sex"), ",")
+  expect_equal(g("Fname;Age;Sex"), ";")
+  expect_equal(g("Fname Age Sex"), "")
+})
+
+test_that("the sheet join tries every key and picks the best", {
+  ## Sentrix_ID + Sentrix_Position, and an id that is an IDAT file name.
+  ids <- c("200607130026_R06C01", "200607130026_R07C01")
+  out <- data.frame(sample_id = paste0("b1_", ids), sentrix = ids,
+                    Basename = file.path("/x", ids), stringsAsFactors = FALSE)
+
+  split_sheet <- data.frame(Sentrix_ID = rep("200607130026", 2),
+                            Sentrix_Position = c("R06C01", "R07C01"),
+                            Sample_Name = c("a", "b"), Age = c(1, 2),
+                            stringsAsFactors = FALSE)
+  j1 <- methylQC:::.join_sheet(out, split_sheet, mqcdefaults(), methylQC:::nulllog())
+  expect_equal(j1$Age, c(1, 2))
+
+  fn_sheet <- data.frame(Fname = paste0(ids, "_Grn.idat"), Age = c(7, 8),
+                         stringsAsFactors = FALSE)
+  j2 <- methylQC:::.join_sheet(out, fn_sheet, mqcdefaults(), methylQC:::nulllog())
+  expect_equal(j2$Age, c(7, 8))
+})
+
+test_that("a text file that is not a sample sheet is ignored", {
+  d <- file.path(tempdir(), paste0("sh2", as.integer(runif(1) * 1e6)))
+  dir.create(d, recursive = TRUE); on.exit(unlink(d, recursive = TRUE))
+  writeLines(c("note\tvalue", "sampled on\t2026-01-01"),
+             file.path(d, "sample_notes.txt"))
+  expect_null(methylQC:::.read_sheets(d, NULL, mqcdefaults(), methylQC:::nulllog()))
+})

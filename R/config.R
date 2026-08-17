@@ -7,10 +7,17 @@
 .mqc_defaults <- list(
 
   ## ---- sample sheet column resolution ------------------------------------
-  sheetpattern  = "(?i)sample.?sheet.*\\.(csv|xlsx?|txt|tsv)$",
+  ## Any delimited file whose name looks like a sample annotation. The 3.0.x
+  ## pattern required the literal string "sample?sheet", so a file named
+  ## samples.BM.PH1.txt -- a perfectly ordinary name -- was never found and the
+  ## run silently proceeded with no metadata at all.
+  sheetpattern  = "(?i)(sample|target|pheno|manifest|annot).*\\.(csv|tsv|txt|xlsx?)$",
   idcol         = "Sample_Name",
   idaliases     = c("Sample_Name", "sample_name", "Sample_ID", "sample_id",
-                    "SampleID", "Name", "ID"),
+                    "SampleID", "Name", "ID",
+                    ## file-name style identifiers, common in lab-made sheets
+                    "Fname", "FileName", "File_Name", "File", "Array",
+                    "Basename", "Sentrix", "Sentrix_Barcode", "Barcode"),
   basecol       = "Basename",
   sexcol        = "Reported_Sex",
   sexaliases    = c("Reported_Sex", "Sex", "sex", "gender", "Gender",
