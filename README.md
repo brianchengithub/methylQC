@@ -87,13 +87,13 @@ Useful arguments to `pipeline()`:
 
 ## 2. Redraw the report at a different threshold
 
-No reprocessing. This reads `qccache.rds` only and takes about a second.
+Updated QC plots without reprocessing entire pipeline. Uses only `qccache.rds`.
 
 ```r
 qcplots("/path/to/output/directory", detp = 0.01)
 ```
 
-Point it at a **parent folder** to do every project beneath it at once:
+Point it at a **parent folder** to redo all projects (multiple) within parent folder:
 
 ```r
 qcplots("~/projects", detp = 0.01)
@@ -110,16 +110,15 @@ Everything you can change:
 | `intfloor` | `1300` | number or `NA` | absolute intensity floor; a **whole-cohort warning only**, `NA` disables |
 | `inclqual` | `FALSE` | `TRUE`/`FALSE` | include design-masked probes in the probe-failure panel |
 
-The sample sheet is rewritten to match, so the report and the CSV cannot
-disagree about how many samples failed.
+
 
 ---
 
 ## 3. Load masked betas for downstream work
 
-Nothing on disk is masked, so you pick the policy when you use the data. Give
+Initially, nothing is masked, allowing the user finer control. Give
 the output directory and say which masks you want — the matrices are found,
-read and combined for you:
+read and combined automatically:
 
 ```r
 b <- loadbetas("/path/to/output/directory", maskuse = "both")
@@ -132,7 +131,7 @@ b <- loadbetas("/path/to/output/directory", maskuse = "both")
 | `"design"` | design mask only |
 | `"none"` | nothing; the stored matrix as-is |
 
-Masked cells become `NA`; no probe or sample is removed.
+Masked cells become `NA`; no probe or sample is removed. Imputation is not explicitly supported, but could be considered here.
 
 Two further arguments, each doing exactly one thing and independent of the
 other:
@@ -153,7 +152,7 @@ keep <- ss$sample_id[!ss$low_intensity]        # tolerate a low call rate
 b <- loadbetas("/path/to/output/directory")[, keep]
 ```
 
-So, an EWAS-ready M-value matrix with QC failures removed:
+Example:  For EWAS-ready M-value matrix with QC failures removed:
 
 ```r
 m <- loadbetas("/path/to/output/directory", values = "M", samples = "passing")
@@ -210,30 +209,6 @@ methylQC::build_epicv2_table()      # from the package source directory
 
 Until then `collapsev2()` falls back to keeping the replicate with the lowest
 median detection p-value, and says so.
-
----
-
-## Repairing a run made before 3.0.2
-
-Before 3.0.2 detection ran before `noob` rather than after, which made the
-detection p-values unusable (METHODS.md section 2.2). The **beta matrix is
-unaffected** — it never depended on when detection ran — so a full reprocess is
-not needed if the run retained its `SigDF` objects, which is the default:
-
-```r
-redetect("/path/to/output/directory")   # rebuild detP_all.rds from sdfs_all.rds
-prep("/path/to/output/directory")       # redo Stage 2 against it
-```
-
-Check what a run used:
-
-```r
-attr(readRDS(".../data/matrices/betas_all.rds"), "methylqc")$prep
-# "C|DB|ELBAR"    current
-# "C|D+ELBAR|B"   pre-3.0.2, needs the repair above
-```
-
-Without `sdfs_all.rds`, re-run `pipeline()`.
 
 ---
 
