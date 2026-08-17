@@ -213,4 +213,28 @@ median detection p-value, and says so.
 
 ---
 
+## Repairing a run made before 3.0.2
+
+Before 3.0.2 detection ran before `noob` rather than after, which made the
+detection p-values unusable (METHODS.md section 2.2). The **beta matrix is
+unaffected** — it never depended on when detection ran — so a full reprocess is
+not needed if the run retained its `SigDF` objects, which is the default:
+
+```r
+redetect("/path/to/output/directory")   # rebuild detP_all.rds from sdfs_all.rds
+prep("/path/to/output/directory")       # redo Stage 2 against it
+```
+
+Check what a run used:
+
+```r
+attr(readRDS(".../data/matrices/betas_all.rds"), "methylqc")$prep
+# "C|DB|ELBAR"    current
+# "C|D+ELBAR|B"   pre-3.0.2, needs the repair above
+```
+
+Without `sdfs_all.rds`, re-run `pipeline()`.
+
+---
+
 MIT licensed. Issues and pull requests welcome.

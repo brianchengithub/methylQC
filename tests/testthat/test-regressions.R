@@ -912,3 +912,48 @@ test_that("the transient collapse picks the same replicate collapsev2 would", {
   expect_equal(unname(cv$betas["cg1", "s1"]), 0.9)
   expect_equal(rownames(cv$betas), c("cg1", "cg2"))
 })
+
+test_that("redetect rebuilds detP from stored SigDFs and clears the cache", {
+  skip_if_not_installed("sesameData")
+  sdf <- tryCatch(sesameData::sesameDataGet("EPIC.1.SigDF"), error = function(e) NULL)
+  skip_if(is.null(sdf), "sesameData cache unavailable")
+
+  d <- file.path(tempdir(), paste0("rd", as.integer(runif(1) * 1e6)))
+  on.exit(unlink(d, recursive = TRUE))
+  dir.create(dirname(mqcpath(d, "betas")), recursive = TRUE)
+  dir.create(dirname(mqcpath(d, "cache")), recursive = TRUE)
+
+  ## A run in the old shape: post-noob SigDFs retained, and a detP computed the
+  ## old way (ELBAR before noob), which is what needs repairing.
+  post <- sesame::prepSesame(sdf, "CDB")
+  b <- sesame::getBetas(post, mask = FALSE)
+  betas <- cbind(s1 = b, s2 = b)
+  old <- suppressWarnings(sesame::ELBAR(sesame::prepSesame(sdf, "CD"),
+                                        return.pval = TRUE))
+  old <- old[rownames(betas)]
+  saveRDS(betas, mqcpath(d, "betas"))
+  saveRDS(cbind(s1 = old, s2 = old), mqcpath(d, "detp"))
+  saveRDS(list(s1 = post, s2 = post), mqcpath(d, "sdfs"))
+  saveRDS(list(cache_version = 3L), mqcpath(d, "cache"))
+
+  before <- mean(readRDS(mqcpath(d, "detp"))[, 1] <= 0.05)
+  redetect(d, logger = methylQC:::nulllog())
+  after <- mean(readRDS(mqcpath(d, "detp"))[, 1] <= 0.05)
+
+  expect_lt(after, before)                       # the inflated call rate drops
+  expect_equal(after, 0.9920, tolerance = 1e-3)  # matches a fresh post-noob run
+  expect_equal(dim(readRDS(mqcpath(d, "detp"))), dim(betas))
+  expect_false(file.exists(mqcpath(d, "cache"))) # stale cache removed
+  ## The beta matrix is not touched: it never depended on when detection ran.
+  expect_equal(readRDS(mqcpath(d, "betas")), betas)
+})
+
+test_that("redetect refuses when there are no retained SigDFs", {
+  d <- file.path(tempdir(), paste0("rd2", as.integer(runif(1) * 1e6)))
+  on.exit(unlink(d, recursive = TRUE))
+  dir.create(dirname(mqcpath(d, "betas")), recursive = TRUE)
+  saveRDS(matrix(0.5, 4, 2, dimnames = list(paste0("cg", 1:4), c("a", "b"))),
+          mqcpath(d, "betas"))
+  expect_error(redetect(d, logger = methylQC:::nulllog()),
+               "has to be repeated with pipeline")
+})
