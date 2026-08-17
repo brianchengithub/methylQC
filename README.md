@@ -85,11 +85,13 @@ detected, keeping the probe recommended by Peters et al. (2024). Betas,
 p-values and the design mask collapse together in one operation, so they cannot
 drift apart.
 
-**The report reads as one document.** Every per-sample panel — call rate,
-intensity, probe failure, density, sex, age, MDS, PCs — carries the same flag
-colouring, so a sample flagged on the first panel is identifiable on all the
-others. Flagged sample IDs and their reasons are printed to the console and the
-log, not just counted.
+**The report reads as one document.** The first three panels reproduce the
+methylQC 2.x report — a horizontal detection-rate bar chart, a mean-intensity
+histogram, and a per-probe failure histogram whose y axis is capped so the
+leftmost spike does not flatten the tail. The remaining per-sample panels share
+one flag palette, so a flagged sample is identifiable across all of them.
+Flagged sample IDs and their reasons are printed to the console and the log,
+not just counted.
 
 **What each PC represents.** PC1–PC6 are tested against a fixed set of
 variables — chip slide, chip row, chip column, plate, well row, well column,

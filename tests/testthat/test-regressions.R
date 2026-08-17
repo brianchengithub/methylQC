@@ -646,3 +646,40 @@ test_that("a path with no methylQC output at all is named explicitly", {
   expect_error(methylQC:::.find_outdirs(file.path(d, "nope")),
                "does not exist")
 })
+
+test_that("the probe-failure y cap ignores the leftmost spike", {
+  ## Nearly every probe passes in nearly every sample, so bar 1 dwarfs the rest
+  ## and, uncapped, flattens the informative tail onto the axis.
+  f <- methylQC:::.probefail_ycap
+  mids <- seq(0.0125, 0.9875, length.out = 40)
+  counts <- c(684601L, rep(0L, 9), rep(9000L, 5), rep(100L, 25))
+  cap <- f(counts, mids)
+  expect_equal(cap, 1.5 * 9000)
+  expect_lt(cap, counts[1])                 # the spike is clipped
+
+  ## With nothing beyond 0.05 the cap falls back to the tallest bar.
+  only_spike <- c(5000L, rep(0L, 39))
+  expect_equal(f(only_spike, mids), 5000)
+  expect_gte(f(rep(0L, 40), mids), 1)       # degenerate input still usable
+})
+
+test_that("intensity fill follows MDS outlier > low intensity > low detection", {
+  qc <- data.frame(
+    sample_id = paste0("s", 1:5),
+    low_callrate  = c(FALSE, TRUE,  FALSE, TRUE,  TRUE),
+    low_intensity = c(FALSE, FALSE, TRUE,  TRUE,  TRUE),
+    mds_outlier   = c(FALSE, FALSE, FALSE, FALSE, TRUE),
+    stringsAsFactors = FALSE)
+  v <- methylQC:::.intensity_fillcat(qc)
+  expect_equal(as.character(v),
+               c("OK", "Low detection", "Low intensity", "Low intensity",
+                 "MDS outlier"))
+  ## All four levels are always present so the legend does not move between
+  ## reports.
+  expect_equal(levels(v),
+               c("OK", "Low detection", "Low intensity", "MDS outlier"))
+})
+
+test_that("per-sample bar labels are dropped only for large cohorts", {
+  expect_equal(methylQC:::.MQC_BAR_MAXLAB, 120L)
+})

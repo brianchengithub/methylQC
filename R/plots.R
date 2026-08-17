@@ -337,7 +337,7 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
 
   .p_callrate(qc, cfg, th)
   .p_intensity(qc, cfg, th)
-  .p_probefail(qc, cfg, th)
+  .p_probefail(probe_fail, cc, cfg, th, failcsv, logger)
   .p_density(cc, qc, th)
   .p_sex(qc, cc, th)
   .p_age(qc, th)
@@ -345,91 +345,166 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
   .p_pca(cc, qc, th, pccsv, logger)
   .p_pcvars(cc, qc, th, logger)
 
-  ## The per-probe list is still written from the per-probe rates, even though
-  ## the panel is now per-sample: it is the only place probe-level failure is
-  ## reported, and downstream exclusion work needs it.
-  .write_failed_probes(probe_fail, cc, cfg, failcsv, logger)
-
   logger$log("plots", sprintf("QC report written to %s", out))
   invisible(out)
 }
 
+## The v2 report's three sample-level panels, restored on request. They use the
+## v2 colour scheme (steelblue / red3 / goldenrod3) rather than the shared flag
+## palette the later panels carry, because that is what the v2 report looked
+## like and matching it was the point.
+
+## Above this many samples the per-sample bar labels stop being legible and are
+## dropped; the bars themselves still show the distribution.
+.MQC_BAR_MAXLAB <- 120L
+
 .p_callrate <- function(qc, cfg, th) {
-  d <- qc[order(qc$call_rate), , drop = FALSE]
-  d$rank <- seq_len(nrow(d))
-  print(ggplot2::ggplot(d, ggplot2::aes(.data$rank, .data$call_rate)) +
-    ggplot2::geom_point(ggplot2::aes(colour = .data$flagcat), size = 1.5) +
-    .scale_flag() +
+  d <- qc
+  d$status <- ifelse(isTRUE_vec(d$low_callrate), "Low detection", "OK")
+  d$status <- factor(d$status, levels = c("OK", "Low detection"))
+  lab <- nrow(d) <= .MQC_BAR_MAXLAB
+  thd <- th + ggplot2::theme(
+    axis.text.y = if (lab) ggplot2::element_text(size = 7)
+                  else ggplot2::element_blank())
+
+  print(ggplot2::ggplot(d, ggplot2::aes(
+        x = stats::reorder(.data$sample_id, .data$call_rate),
+        y = .data$call_rate, fill = .data$status)) +
+    ggplot2::geom_col() +
+    ggplot2::scale_fill_manual(
+      values = c("OK" = "steelblue", "Low detection" = "red3"),
+      name = NULL, drop = FALSE) +
     ggplot2::geom_hline(yintercept = cfg$samplemin, linetype = "dashed",
-                        colour = "firebrick") + th +
+                        colour = "black", linewidth = 0.7) +
+    ggplot2::coord_flip() + thd +
     ggplot2::labs(
-      title = "Sample call rate",
+      title = "Detection rate per sample (frac_dt)",
       subtitle = sprintf(
-        "%d samples; %d below %.3f. Denominator is every probe on the array, so probes with a missing p-value count as failures. Detection threshold %.4g.",
-        nrow(d), sum(isTRUE_vec(d$low_callrate)), cfg$samplemin, cfg$detp),
-      x = "sample (ranked by call rate)", y = "call rate"))
+        "All %d samples; red = below %.2f threshold; dashed line = threshold.%s Detection threshold %.4g.",
+        nrow(d), cfg$samplemin,
+        if (lab) "" else sprintf(" Sample labels omitted above %d samples.",
+                                 .MQC_BAR_MAXLAB),
+        cfg$detp),
+      x = NULL, y = "Fraction detected"))
 }
 
-## Ranked per-sample scatter rather than a histogram, so that the samples
-## flagged on the call-rate panel can be identified here too.
+## v2's precedence was MDS outlier > low intensity > OK. Low call rate is
+## carried here as a fourth level so a sample flagged on the first panel is
+## still identifiable on this one; drop "Low detection" from the ifelse chain
+## and the levels to get v2's three categories exactly.
+#' @keywords internal
+#' @noRd
+.intensity_fillcat <- function(qc) {
+  v <- ifelse(isTRUE_vec(qc$mds_outlier), "MDS outlier",
+       ifelse(isTRUE_vec(qc$low_intensity), "Low intensity",
+       ifelse(isTRUE_vec(qc$low_callrate), "Low detection", "OK")))
+  factor(v, levels = c("OK", "Low detection", "Low intensity", "MDS outlier"))
+}
+
+## Histogram of mean intensity, filled by flag with a fixed precedence.
 .p_intensity <- function(qc, cfg, th) {
-  d <- qc[order(qc$mean_intensity_raw), , drop = FALSE]
-  d$rank <- seq_len(nrow(d))
-  cut <- unique(stats::na.omit(qc$intensity_cutoff))[1]
-  p <- ggplot2::ggplot(d, ggplot2::aes(.data$rank, .data$mean_intensity_raw)) +
-    ggplot2::geom_point(ggplot2::aes(colour = .data$flagcat), size = 1.5) +
-    .scale_flag() + th +
+  d <- qc
+  d$fillcat <- .intensity_fillcat(d)
+  cut <- unique(stats::na.omit(d$intensity_cutoff))[1]
+
+  p <- ggplot2::ggplot(d, ggplot2::aes(.data$mean_intensity_raw,
+                                       fill = .data$fillcat)) +
+    ggplot2::geom_histogram(bins = 30, alpha = 0.85, position = "identity") +
+    ggplot2::scale_fill_manual(
+      values = c("OK" = "steelblue", "Low detection" = "red3",
+                 "Low intensity" = "goldenrod3", "MDS outlier" = "purple3"),
+      name = NULL, drop = FALSE) + th +
     ggplot2::labs(
-      title = "Mean intensity (measured before dye bias and noob)",
+      title = "Mean intensity per sample",
       subtitle = sprintf(
-        "Outliers flagged at %g MAD below the cohort median of log2 intensity; %d flagged. Absolute floor %s is a cohort-level warning only. Colour also carries the call-rate flag.",
-        cfg$intmad, sum(isTRUE_vec(d$low_intensity)),
-        if (is.na(cfg$intfloor)) "disabled" else sprintf("%.0f", cfg$intfloor)),
-      x = "sample (ranked by mean intensity)", y = "mean intensity")
+        paste("All %d samples; colour precedence MDS outlier > low intensity >",
+              "low detection. Dashed line is the %g-MAD cut-off below the",
+              "cohort median of log2 intensity."), nrow(d), cfg$intmad),
+      x = "Mean intensity", y = "Count")
   if (length(cut) && is.finite(cut))
-    p <- p + ggplot2::geom_hline(yintercept = cut, linetype = "dashed",
-                                 colour = "firebrick")
+    p <- p + ggplot2::geom_vline(xintercept = cut, linetype = "dashed",
+                                 colour = "black", linewidth = 0.7)
   print(p)
 }
 
-## Per-sample probe failure: the fraction of the array that failed detection in
-## each sample, ranked, against a horizontal cut-off.
-.p_probefail <- function(qc, cfg, th) {
-  d <- qc
-  d$pct_failed <- 100 * (1 - d$call_rate)
-  d <- d[order(d$pct_failed), , drop = FALSE]
-  d$rank <- seq_len(nrow(d))
-  lim <- 100 * cfg$failmin
-  over <- sum(d$pct_failed >= lim, na.rm = TRUE)
-  print(ggplot2::ggplot(d, ggplot2::aes(.data$rank, .data$pct_failed)) +
-    ggplot2::geom_point(ggplot2::aes(colour = .data$flagcat), size = 1.5) +
-    .scale_flag() +
-    ggplot2::geom_hline(yintercept = lim, linetype = "dashed",
-                        colour = "firebrick") + th +
-    ggplot2::labs(
-      title = "Probe failure rate across samples",
-      subtitle = sprintf(
-        "Percentage of all probes on the array failing detection at p > %.4g, per sample; %d sample(s) at or above %.0f%%. Probe-level failure rates are written to failed_probes.csv.",
-        cfg$detp, over, lim),
-      x = "sample (ranked by % probes failed)", y = "% of probes failed"))
+## Per-PROBE failure histogram over the full 0-1 range, with the y axis capped
+## so the leftmost spike -- the probes that pass in essentially every sample --
+## does not flatten everything else into the axis.
+## The y cap deliberately ignores the leftmost spike: 1.5x the tallest bar at
+## fail_rate >= 0.05. Nearly every probe passes in nearly every sample, so that
+## first bar is one or two orders of magnitude taller than the rest and, left
+## uncapped, compresses the entire informative tail onto the axis. The 0.05 is
+## about where the spike ends and is independent of failmin.
+#' @keywords internal
+#' @noRd
+.probefail_ycap <- function(counts, mids) {
+  rest <- counts[mids >= 0.05]
+  ycap <- if (length(rest) && max(rest) > 0) 1.5 * max(rest) else max(counts)
+  if (!is.finite(ycap) || ycap <= 0) ycap <- max(counts, 1)
+  ycap
 }
 
-.write_failed_probes <- function(pf, cc, cfg, failcsv, logger) {
+.p_probefail <- function(pf, cc, cfg, th, failcsv, logger) {
   if (is.null(pf) || !length(pf)) return(invisible(NULL))
+
   keep <- rep(TRUE, length(pf))
+  qnote <- " (incl. quality-masked)"
   if (!isTRUE(cfg$inclqual) && !is.null(cc$design)) {
     dm <- align_to(cc$design, names(pf), "design mask", fill = FALSE)
     dm[is.na(dm)] <- FALSE
     keep <- !dm
+    qnote <- ""
+    logger$log("plots", sprintf(
+      "probe failure: excluding %s quality-masked probe(s)",
+      format(sum(dm), big.mark = ",")))
   }
-  v <- pf[keep]
-  ids <- names(v)[v >= cfg$failmin]
+  fr <- pf[keep]
+  n_total <- length(fr)
+  tail_ids <- names(fr)[fr >= cfg$failmin]
+
   write_csv_atomic(
-    data.frame(probe_id = ids, fail_rate = unname(v[ids]),
-               stringsAsFactors = FALSE), failcsv)
-  logger$log("plots", sprintf("%s probe(s) at or above failmin %.3f written to %s",
-                              format(length(ids), big.mark = ","),
-                              cfg$failmin, failcsv))
+    data.frame(probe_id = tail_ids, fail_rate = unname(fr[tail_ids]),
+               stringsAsFactors = FALSE)[order(-unname(fr[tail_ids])), ,
+                                         drop = FALSE], failcsv)
+  logger$log("plots", sprintf(
+    "%s probe(s) of %s at or above failmin %.3f written to %s",
+    format(length(tail_ids), big.mark = ","), format(n_total, big.mark = ","),
+    cfg$failmin, failcsv))
+
+  ## Bin by hand so the cap can be derived from the counts.
+  nbins <- 40L
+  breaks <- seq(0, 1, length.out = nbins + 1L)
+  hh <- graphics::hist(fr, breaks = breaks, plot = FALSE)
+  counts <- hh$counts; mids <- hh$mids
+
+  ycap <- .probefail_ycap(counts, mids)
+  clipped <- counts[1] > ycap
+
+  print(ggplot2::ggplot(data.frame(fr = fr), ggplot2::aes(.data$fr)) +
+    ggplot2::geom_histogram(breaks = breaks, fill = "steelblue",
+                            colour = "white") +
+    ggplot2::geom_vline(xintercept = cfg$failmin, linetype = "dashed",
+                        colour = "red3", linewidth = 0.7) +
+    ggplot2::annotate("text", x = cfg$failmin, y = ycap,
+                      label = sprintf(" failmin = %.2f", cfg$failmin),
+                      hjust = 0, vjust = 1.1, colour = "red3", size = 4) +
+    ggplot2::scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+    ggplot2::coord_cartesian(ylim = c(0, ycap)) + th +
+    ggplot2::labs(
+      title = "Per-probe sample-failure rate",
+      subtitle = sprintf(
+        "%s probes from detP%s. %s with fail >= %.2f written to %s.%s",
+        format(n_total, big.mark = ","), qnote,
+        format(length(tail_ids), big.mark = ","), cfg$failmin,
+        basename(failcsv),
+        if (clipped) sprintf(
+          "\nLeftmost bar clipped: %s probes at fail_rate ~ 0 (y capped at %s).",
+          format(counts[1], big.mark = ","), format(round(ycap), big.mark = ","))
+        else ""),
+      x = sprintf("Fraction of samples where probe failed (detP > %.2f)",
+                  cfg$detp),
+      y = "Number of probes"))
+  invisible(NULL)
 }
 
 .p_density <- function(cc, qc, th) {
