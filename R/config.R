@@ -59,7 +59,7 @@
   intfloor      = 1300,     # absolute cohort-level sanity floor (warning only)
 
   ## ---- probe-level QC thresholds -----------------------------------------
-  failmin       = 0.10,     # probe failure rate above which a probe is listed
+  failmin       = 0.05,     # probe failure rate above which a probe is listed
   inclqual      = FALSE,    # include design-masked probes in the failure plot
 
   ## ---- sex calling ---------------------------------------------------------

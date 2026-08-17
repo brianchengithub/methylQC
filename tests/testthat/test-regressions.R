@@ -472,14 +472,35 @@ test_that("the PC/metadata panel ignores methylQC's own flag columns", {
   expect_gt(a$eta2[a$pc == 1][1], 0.8)
 })
 
-test_that("flag categories combine the two sample-level flags", {
-  qc <- data.frame(sample_id = paste0("s", 1:4),
-                   low_callrate = c(FALSE, TRUE, FALSE, TRUE),
-                   low_intensity = c(FALSE, FALSE, TRUE, TRUE),
+test_that("flag categories follow one precedence everywhere", {
+  qc <- data.frame(sample_id = paste0("s", 1:5),
+                   low_callrate  = c(FALSE, TRUE,  FALSE, TRUE,  TRUE),
+                   low_intensity = c(FALSE, FALSE, TRUE,  TRUE,  TRUE),
+                   mds_outlier   = c(FALSE, FALSE, FALSE, FALSE, TRUE),
                    stringsAsFactors = FALSE)
   expect_equal(as.character(methylQC:::.flagcat(qc)),
-               c("pass", "low call rate", "low intensity",
-                 "call rate + intensity"))
+               c("OK", "Low detection", "Low intensity", "Low intensity",
+                 "MDS outlier"))
+  ## The intensity panel and every other panel share one rule.
+  expect_equal(methylQC:::.flagcat(qc), methylQC:::.intensity_fillcat(qc))
+})
+
+test_that("all four flag levels are present a priori, so the legend is stable", {
+  ## An unflagged cohort and a category the code forgot must not look alike.
+  clean <- data.frame(sample_id = c("a", "b"), low_callrate = FALSE,
+                      low_intensity = FALSE, mds_outlier = FALSE,
+                      stringsAsFactors = FALSE)
+  expect_equal(levels(methylQC:::.flagcat(clean)),
+               c("OK", "Low detection", "Low intensity", "MDS outlier"))
+  expect_equal(names(methylQC:::.MQC_FLAG_COLS),
+               c("OK", "Low detection", "Low intensity", "MDS outlier"))
+  ## Every scale must be drop = FALSE or absent levels vanish from the legend.
+  expect_false(methylQC:::.scale_flag()$drop)
+  expect_false(methylQC:::.scale_flag_fill()$drop)
+})
+
+test_that("failmin defaults to 0.05", {
+  expect_equal(mqcdefaults()$failmin, 0.05)
 })
 
 test_that("the sex cut-off is the midpoint of the gap above the female cluster", {
@@ -682,4 +703,28 @@ test_that("intensity fill follows MDS outlier > low intensity > low detection", 
 
 test_that("per-sample bar labels are dropped only for large cohorts", {
   expect_equal(methylQC:::.MQC_BAR_MAXLAB, 120L)
+})
+
+test_that("the cell-type panel needs at least two numeric cell_ columns", {
+  ## rundish() prefixes its output cell_; nothing else in the sheet does.
+  qc1 <- data.frame(sample_id = c("a", "b"), cell_Neu = c(0.6, 0.7),
+                    stringsAsFactors = FALSE)
+  expect_null(methylQC:::.p_cells(qc1, methylQC:::.theme_qc()))
+
+  qc0 <- data.frame(sample_id = c("a", "b"), Age = c(30, 40),
+                    stringsAsFactors = FALSE)
+  expect_null(methylQC:::.p_cells(qc0, methylQC:::.theme_qc()))
+})
+
+test_that("the cell-type panel survives a sample with no composition", {
+  set.seed(41)
+  n <- 12
+  qc <- data.frame(sample_id = paste0("s", seq_len(n)),
+                   cell_Neu = runif(n, 0.5, 0.7),
+                   cell_Mono = runif(n, 0.05, 0.1),
+                   cell_NK = runif(n, 0.02, 0.06),
+                   stringsAsFactors = FALSE)
+  qc[3, c("cell_Neu", "cell_Mono", "cell_NK")] <- NA   # EpiDISH declined this one
+  pdf(tempfile()); on.exit(dev.off(), add = TRUE)
+  expect_silent(methylQC:::.p_cells(qc, methylQC:::.theme_qc()))
 })

@@ -54,29 +54,31 @@
 ## variables most likely to carry a batch effect.
 .MQC_POSITION_COLS <- c("sentrix_slide", "sentrix_row", "sentrix_col")
 
-## One palette, used by every per-sample panel.
+## One palette, used by every per-sample panel. The levels are fixed a priori
+## and every scale is drawn with drop = FALSE, so all four appear in the legend
+## of every panel whether or not the cohort contains any -- an absent category
+## and an unflagged cohort would otherwise look identical.
 .MQC_FLAG_COLS <- c(
-  "pass"                = "grey55",
-  "low call rate"       = "firebrick",
-  "low intensity"       = "darkorange2",
-  "call rate + intensity" = "purple3")
+  "OK"            = "steelblue",
+  "Low detection" = "red3",
+  "Low intensity" = "goldenrod3",
+  "MDS outlier"   = "purple3")
 
-#' Categorise each sample by the two sample-level flags
+#' Categorise each sample for colouring
 #'
-#' The call-rate and intensity flags are the two that every other panel carries
-#' through, so they are turned into one factor here and reused everywhere.
+#' One sample can trip several flags, so the categories are ordered by
+#' precedence: MDS outlier beats low intensity, which beats low detection. The
+#' factor always carries all four levels.
 #'
 #' @param qc flagged metrics frame.
 #' @return a factor with the levels of \code{.MQC_FLAG_COLS}.
 #' @keywords internal
 #' @noRd
 .flagcat <- function(qc) {
-  cr <- isTRUE_vec(qc$low_callrate)
-  it <- isTRUE_vec(qc$low_intensity)
-  factor(ifelse(cr & it, "call rate + intensity",
-         ifelse(cr, "low call rate",
-         ifelse(it, "low intensity", "pass"))),
-         levels = names(.MQC_FLAG_COLS))
+  v <- ifelse(isTRUE_vec(qc$mds_outlier), "MDS outlier",
+       ifelse(isTRUE_vec(qc$low_intensity), "Low intensity",
+       ifelse(isTRUE_vec(qc$low_callrate), "Low detection", "OK")))
+  factor(v, levels = names(.MQC_FLAG_COLS))
 }
 
 ## NA-safe logical coercion; a flag that could not be computed is not a flag.
@@ -89,9 +91,13 @@ isTRUE_vec <- function(x) {
   x
 }
 
-.scale_flag <- function(name = "sample flag")
+.scale_flag <- function(name = NULL)
   ggplot2::scale_colour_manual(values = .MQC_FLAG_COLS, name = name,
                                drop = FALSE, na.value = "grey80")
+
+.scale_flag_fill <- function(name = NULL)
+  ggplot2::scale_fill_manual(values = .MQC_FLAG_COLS, name = name,
+                             drop = FALSE, na.value = "grey80")
 
 #' Build the PCA input matrix
 #'
@@ -305,7 +311,12 @@ betadensity <- function(betas, nsub = 20000L) {
     ggplot2::theme(
       panel.grid.minor = ggplot2::element_blank(),
       plot.title = ggplot2::element_text(face = "bold", size = 11),
-      plot.subtitle = ggplot2::element_text(size = 9, colour = "grey30"))
+      plot.subtitle = ggplot2::element_text(size = 9, colour = "grey30"),
+      legend.background = ggplot2::element_rect(fill = "white",
+                                                colour = "grey70",
+                                                linewidth = 0.3),
+      legend.key = ggplot2::element_blank(),
+      legend.margin = ggplot2::margin(4, 6, 4, 6))
 }
 
 #' Render the QC report
@@ -339,6 +350,7 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
   .p_intensity(qc, cfg, th)
   .p_probefail(probe_fail, cc, cfg, th, failcsv, logger)
   .p_density(cc, qc, th)
+  .p_cells(qc, th)
   .p_sex(qc, cc, th)
   .p_age(qc, th)
   .p_mds(cc, qc, cfg, th)
@@ -360,8 +372,7 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
 
 .p_callrate <- function(qc, cfg, th) {
   d <- qc
-  d$status <- ifelse(isTRUE_vec(d$low_callrate), "Low detection", "OK")
-  d$status <- factor(d$status, levels = c("OK", "Low detection"))
+  d$status <- .flagcat(d)
   lab <- nrow(d) <= .MQC_BAR_MAXLAB
   thd <- th + ggplot2::theme(
     axis.text.y = if (lab) ggplot2::element_text(size = 7)
@@ -371,9 +382,7 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
         x = stats::reorder(.data$sample_id, .data$call_rate),
         y = .data$call_rate, fill = .data$status)) +
     ggplot2::geom_col() +
-    ggplot2::scale_fill_manual(
-      values = c("OK" = "steelblue", "Low detection" = "red3"),
-      name = NULL, drop = FALSE) +
+    .scale_flag_fill() +
     ggplot2::geom_hline(yintercept = cfg$samplemin, linetype = "dashed",
                         colour = "black", linewidth = 0.7) +
     ggplot2::coord_flip() + thd +
@@ -388,18 +397,11 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
       x = NULL, y = "Fraction detected"))
 }
 
-## v2's precedence was MDS outlier > low intensity > OK. Low call rate is
-## carried here as a fourth level so a sample flagged on the first panel is
-## still identifiable on this one; drop "Low detection" from the ifelse chain
-## and the levels to get v2's three categories exactly.
+## Retained as the documented name for the precedence rule; identical to
+## .flagcat(), which every other panel uses.
 #' @keywords internal
 #' @noRd
-.intensity_fillcat <- function(qc) {
-  v <- ifelse(isTRUE_vec(qc$mds_outlier), "MDS outlier",
-       ifelse(isTRUE_vec(qc$low_intensity), "Low intensity",
-       ifelse(isTRUE_vec(qc$low_callrate), "Low detection", "OK")))
-  factor(v, levels = c("OK", "Low detection", "Low intensity", "MDS outlier"))
-}
+.intensity_fillcat <- function(qc) .flagcat(qc)
 
 ## Histogram of mean intensity, filled by flag with a fixed precedence.
 .p_intensity <- function(qc, cfg, th) {
@@ -410,10 +412,7 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
   p <- ggplot2::ggplot(d, ggplot2::aes(.data$mean_intensity_raw,
                                        fill = .data$fillcat)) +
     ggplot2::geom_histogram(bins = 30, alpha = 0.85, position = "identity") +
-    ggplot2::scale_fill_manual(
-      values = c("OK" = "steelblue", "Low detection" = "red3",
-                 "Low intensity" = "goldenrod3", "MDS outlier" = "purple3"),
-      name = NULL, drop = FALSE) + th +
+    .scale_flag_fill() + th +
     ggplot2::labs(
       title = "Mean intensity per sample",
       subtitle = sprintf(
@@ -433,8 +432,9 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
 ## The y cap deliberately ignores the leftmost spike: 1.5x the tallest bar at
 ## fail_rate >= 0.05. Nearly every probe passes in nearly every sample, so that
 ## first bar is one or two orders of magnitude taller than the rest and, left
-## uncapped, compresses the entire informative tail onto the axis. The 0.05 is
-## about where the spike ends and is independent of failmin.
+## uncapped, compresses the entire informative tail onto the axis. This 0.05 is
+## about where the spike ends; it is NOT failmin, and stays put if failmin
+## moves -- the two coinciding at the default is a coincidence.
 #' @keywords internal
 #' @noRd
 .probefail_ycap <- function(counts, mids) {
@@ -505,6 +505,57 @@ qcreport <- function(qc, cc, probe_fail, out, failcsv, pccsv,
                   cfg$detp),
       y = "Number of probes"))
   invisible(NULL)
+}
+
+## Stacked composition per sample. Ordered by whichever cell type dominates the
+## cohort, so a sample whose composition departs from the rest is visible as a
+## break in the stack rather than having to be hunted for.
+.p_cells <- function(qc, th) {
+  cols <- grep("^cell_", names(qc), value = TRUE)
+  cols <- cols[vapply(cols, function(k) is.numeric(qc[[k]]), logical(1))]
+  if (length(cols) < 2L) return(invisible(NULL))
+
+  m <- as.matrix(qc[, cols, drop = FALSE])
+  keep <- stats::complete.cases(m)
+  if (!any(keep)) return(invisible(NULL))
+  m <- m[keep, , drop = FALSE]
+  ids <- qc$sample_id[keep]
+  types <- sub("^cell_", "", cols)
+
+  ## Row sums are reported rather than forced to 1: EpiDISH's RPC does not
+  ## constrain them, and a row summing to well under 1 means the reference
+  ## panel did not explain that sample.
+  rs <- rowSums(m)
+  top <- types[which.max(colMeans(m))]
+  ord <- order(m[, which.max(colMeans(m))], decreasing = TRUE)
+
+  d <- data.frame(
+    sample = factor(rep(ids[ord], times = length(types)),
+                    levels = ids[ord]),
+    type = factor(rep(types, each = length(ord)), levels = types),
+    prop = as.vector(m[ord, , drop = FALSE]),
+    stringsAsFactors = FALSE)
+
+  ## A fixed, reproducible qualitative palette: the same cell type gets the
+  ## same colour in every report.
+  pal <- stats::setNames(
+    grDevices::hcl.colors(length(types), palette = "Dark 3"), types)
+
+  print(ggplot2::ggplot(d, ggplot2::aes(.data$sample, .data$prop,
+                                        fill = .data$type)) +
+    ggplot2::geom_col(width = 1) +
+    ggplot2::scale_fill_manual(values = pal, name = NULL) +
+    ggplot2::scale_y_continuous(expand = c(0, 0)) + th +
+    ggplot2::theme(axis.text.x = ggplot2::element_blank(),
+                   axis.ticks.x = ggplot2::element_blank(),
+                   panel.grid.major.x = ggplot2::element_blank()) +
+    ggplot2::labs(
+      title = "EpiDISH cell-type proportions",
+      subtitle = sprintf(
+        "%d samples; %d cell types; sorted by %s. Row-sum median=%.3f (range %.3f-%.3f).",
+        length(ids), length(types), top,
+        stats::median(rs), min(rs), max(rs)),
+      x = "Sample", y = "Proportion"))
 }
 
 .p_density <- function(cc, qc, th) {

@@ -75,7 +75,8 @@ updates. Missing probes are filled from the cohort mean for that probe, and
 per-sample coverage is recorded.
 
 **Cell composition.** EpiDISH deconvolution against a choice of reference
-panels. One failed array does not take the rest of the cohort with it.
+panels, with a stacked per-sample composition panel in the report. One failed
+array does not take the rest of the cohort with it.
 
 **Identity.** rs-probe genotype concordance for every pair, to catch sample
 swaps and confirm repeated measurements come from the same donor.
@@ -307,7 +308,8 @@ mqcreset()                   # revert
 | `samplemin` | `0.95` | minimum call rate |
 | `intmad` | `3` | MAD multiplier for intensity outliers |
 | `intfloor` | `1300` | absolute floor, cohort-level **warning only**; `NA` disables |
-| `failmin` | `0.10` | probe failure rate above which a probe is listed |
+| `failmin` | `0.05` | probe failure rate above which a probe is listed and marked |
+| `inclqual` | `FALSE` | include design-masked probes in the failure panel |
 | `sexsep` | `1.0` | chrY separation floor below which no sex is called |
 | `sexcutsd` | `4` | trim width for "high-confidence female", in MADs; selects who defines the boundary, not the boundary itself |
 | `sexmin` | `8` | cohort size below which no sex is called |
@@ -321,7 +323,6 @@ mqcreset()                   # revert
 | `dishref` / `dishmethod` | `"blood"` / `"RPC"` | EpiDISH settings |
 | `snpmin` | `0.70` | concordance below which an unrelated pair is not reported |
 | `sheetpatterns` | 4 patterns | sample sheet filename search, strictest first |
-| `failmin` | `0.10` | per-sample probe failure rate marked on the failure panel |
 | `idaliases` | see `mqcdefaults()` | accepted sample identifier column names |
 
 ---

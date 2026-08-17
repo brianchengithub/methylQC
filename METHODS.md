@@ -365,6 +365,35 @@ the standard deviations and the probe count, so only those are kept.
 
 ---
 
+### 5.3 The principal component pages
+
+PC1 through PC6 are tested against a fixed set of variables, one variable per
+page, six panels to a page: chip slide, chip row, chip column, plate, well row,
+well column, age and sex. They are drawn whether or not they associate,
+because "this component is not the plate" is as useful to a reader as the
+converse, and a page that was never drawn is indistinguishable from a variable
+that has no effect. Anything not drawn is named in the log with the reason.
+
+Chip position is parsed from the Sentrix barcode by `discover()`
+(`200607130026_R06C01` → slide `200607130026`, row `06`, column `01`); well
+position is parsed from a well column if the sheet has one, taking the letter
+as the row and the digits as the column. A cohort can be laid out on chips, on
+plates, or on both, and either layout can carry a batch effect.
+
+Association is eta squared from one-way analysis of variance for a categorical
+variable, and Pearson r for a continuous one; the panel type follows, a boxplot
+against a scatter. "Continuous" means numeric with more than twelve distinct
+values, so a numeric plate number is still treated as a factor.
+
+methylQC's own outputs — `flagged`, `mds_outlier`, `low_callrate` and the rest
+— are excluded from the candidate set. Associating a component with a flag
+derived from the same beta matrix the PCA is built on is circular, and it
+crowds out the batch or tissue variable the page exists to surface. Any
+remaining sheet variable reaching eta squared 0.10 against some PC gets its own
+page too, capped at six such pages.
+
+---
+
 ## 6. EPICv2 replicate probes
 
 EPICv2 measures some CpG sites with more than one probe design, distinguished
@@ -426,7 +455,7 @@ intercept biases every prediction in the same direction.
 
 ---
 
-## 7a. Sex calling
+## 8. Sex calling
 
 Sex is called from sex-chromosome intensity by methylQC's own cohort-relative
 caller, not by `sesame::inferSex()`.
@@ -499,7 +528,66 @@ swap matters most.
 
 ---
 
-## 8. Parallelism
+## 9. The QC report
+
+Eight sample-level panels, then the principal component pages. Every panel is
+redrawn from `qc/qccache.rds` by `qcplots()`; only the PCA and MDS
+*coordinates* are frozen.
+
+### 9.1 Colour
+
+One palette, fixed a priori, used by every panel that colours samples:
+
+| level | colour | meaning |
+|---|---|---|
+| OK | steelblue | no sample-level flag |
+| Low detection | red3 | call rate below `samplemin` |
+| Low intensity | goldenrod3 | more than `intmad` MADs below the cohort median |
+| MDS outlier | purple3 | further than `mdssd` SDs from the MDS centroid |
+
+A sample can trip several, so the categories are ordered by precedence: MDS
+outlier beats low intensity, which beats low detection. Every scale is drawn
+with `drop = FALSE`, so all four levels appear in the legend of every panel
+whether or not the cohort contains any — otherwise a clean cohort and a
+category the code had forgotten to compute would look identical.
+
+### 9.2 The panels
+
+1. **Detection rate per sample.** Horizontal bars, one per sample, ordered by
+   call rate, with a dashed line at `samplemin`. Sample labels are dropped
+   above 120 samples, where they stop being legible.
+2. **Mean intensity per sample.** Histogram, filled by flag, dashed line at the
+   MAD-derived cut-off.
+3. **Per-probe sample-failure rate.** Histogram of the fraction of samples in
+   which each probe failed, over the full 0–1 range. The y axis is capped at
+   1.5× the tallest bar at `fail_rate >= 0.05`, because nearly every probe
+   passes in nearly every sample and that leftmost spike is one to two orders
+   of magnitude taller than everything else — uncapped it compresses the whole
+   informative tail onto the axis. The subtitle states the clipped count and
+   the cap when clipping occurs. That 0.05 marks where the spike ends and is
+   independent of `failmin`; the two coinciding at the default is a
+   coincidence. Design-masked probes are excluded unless `inclqual = TRUE`, and
+   probes at or above `failmin` are written to `failed_probes.csv`.
+4. **Beta value density.** One curve per sample, flagged samples opaque and in
+   their flag colour over a faded cohort.
+5. **EpiDISH cell-type proportions.** Stacked composition per sample, ordered
+   by whichever cell type dominates the cohort, so a sample whose composition
+   departs from the rest shows up as a break in the stack. Row sums are
+   reported in the subtitle rather than forced to 1: RPC does not constrain
+   them, and a row summing well below 1 means the reference panel did not
+   explain that sample.
+6. **Sex chromosome intensity.** chrX against chrY, coloured by *reported* sex,
+   with the strict cut-off drawn and samples failing detection or intensity
+   ringed. Mismatches are not highlighted here — the point of the panel is to
+   show the clusters the call was made from.
+7. **Reported versus epigenetic age.** With a transparent ±3 SD band about the
+   fitted line.
+8. **MDS of retained probes.** With a dashed circle at `mdssd` SDs from the
+   cohort centroid.
+
+Then a scree plot, and the principal component pages (section 5.3).
+
+## 10. Parallelism
 
 Parallelism is by forking (`BiocParallel::MulticoreParam`), so macOS and
 Linux only.
@@ -537,7 +625,7 @@ positionally.
 
 ---
 
-## 9. Memory
+## 11. Memory
 
 Parent-side requirement is arithmetic, known before any IDAT is read:
 `n_probes × n_samples × 8 bytes` per retained double matrix. At 866,553
@@ -569,7 +657,7 @@ and `makemat()` reassembles them later.
 
 ---
 
-## 10. Known limits
+## 12. Known limits
 
 - Parallel execution is unavailable on Windows.
 - `collapsemethod = "peters"` requires `build_epicv2_table()` to have been run
