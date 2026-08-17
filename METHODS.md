@@ -164,33 +164,54 @@ reproduces the detection mask exactly, at whatever threshold is chosen later.
 
 ### 2.3 `Q` is dropped
 
-`qualityMask()` writes only to `sdf$mask` (`R/mask.R:176-186`, via `addMask`
-at `:15-21`) and touches no intensity. Nothing downstream in this chain reads
-that column:
+`Q` (`qualityMask`) writes only to `sdf$mask`. Nothing else in this chain reads
+that column, so prepending it changes no number methylQC produces. Rather than
+rest that on a reading of sesame's source — whose line numbers have already
+drifted once — it is measured, on `EPIC.1.SigDF` under sesame 1.28.1, and
+enforced by a regression test:
 
-- `inferInfiniumIChannel` never reads the mask; its `mask_failed` argument
-  defaults `FALSE` and only writes.
-- `dyeBiasNL` defaults to `mask = TRUE`, which — despite the name — means
-  *use all Infinium-I probes including masked ones*, with the source comment
-  explaining they want the entire support range (`R/dye_bias.R:123-124`). Only
-  `mask = FALSE` consults the mask, and `prepSesame` passes no extra
-  arguments.
-- Its early-exit branch depends on the dye bias statistic, which routes
-  through `totalIntensities(sdf)` defaulting to `mask = FALSE`
-  (`R/sesame.R:111-113`), so `Q` cannot flip that branch either.
-- `ELBAR` calls `signalMU(mask = FALSE)` in both places.
-- `noob` filters by `nonuniqMask(platform)` directly (`R/background.R:86`),
-  not by the mask column.
-- `getBetas(mask = FALSE)` skips masking entirely (`R/sesame.R:209`).
+| | `CDB` vs `QCDB` |
+|---|---|
+| `MG`, `MR`, `UG`, `UR` after the chain | identical, max abs difference 0 |
+| ELBAR detection p-values | identical |
+| call rate at p ≤ 0.05 | 0.99204 vs 0.99204 |
+| `getBetas(mask = FALSE)` | identical, no `NA` either way |
+| `getBetas(mask = TRUE)` | 0 `NA` vs 105,454 `NA` |
 
-`CDB` and `QCDB` therefore produce identical intensities, identical ELBAR
-p-values and identical betas. `Q`'s only effect would be to pre-load the mask
-column so that the final mask is a union of design and detection failures with
-no record of which — which is exactly what section 3 is designed to avoid.
+`Q` masks 105,454 of 866,553 probes on EPIC, 12.2%. Its entire effect is that
+last row: it decides what `getBetas(mask = TRUE)` deletes. methylQC calls
+`getBetas(mask = FALSE)` and stores the mask separately as a named logical
+vector in `design_mask.rds`, so the information is kept without punching
+105,454 holes in the beta matrix.
 
-The multi-mapping protection that sesame's ordering comment attributes to
-`Q` is in fact hard-coded inside pOOBAH and noob via `nonuniqMask()`, and is
-therefore unaffected.
+Applying `Q` would therefore not "clean up" the preprocessing. `dyeBiasNL`
+fits on all Infinium-I probes including masked ones, ELBAR calls
+`signalMU(mask = FALSE)`, and `noob` filters by `nonuniqMask(platform)`
+directly rather than by `sdf$mask` — all three ignore it by construction.
+
+One statistic does move: `sesameQC_calcStats(sdf, "intensity")` respects the
+mask, so mean intensity reads 3,153.7 after `QC` against 3,172.9 after `C`, 0.60%
+lower. That cannot change which samples are flagged. The design mask is a
+platform lookup — `qualityMask(resetMask(sdf))` depends only on the probe set
+and the platform, so every sample in a cohort is masked at exactly the same
+105,454 probes — and the intensity rule is cohort-relative, comparing each
+sample against the cohort's own median absolute deviation. A shift applied
+identically to every sample leaves that comparison untouched.
+
+**Where the design mask *is* applied.** Dropping `Q` from the prep string does
+not mean the mask is ignored; it means it is applied where it matters, by
+methylQC rather than by sesame:
+
+- **PCA and MDS input** exclude design-masked probes outright (section 5).
+- **The probe-failure panel** excludes them unless `inclqual = TRUE`.
+- **`cleanmat()`** applies them on demand, under the policy the caller picks.
+
+Two places deliberately do *not* mask, because the published methods they
+implement were not derived on masked data: **epigenetic age** (section 7) and
+**cell composition**. For reference, 8 of the 334 Horvath clock probes present
+on EPIC are design-masked (2.4%), as are 15 of the 315 EpiDISH blood reference
+probes (4.8%). Dropping those would silently shrink a published model rather
+than improve it.
 
 ### 2.4 `I` is not in the string
 

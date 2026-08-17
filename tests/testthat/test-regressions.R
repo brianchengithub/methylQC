@@ -768,3 +768,47 @@ test_that("the run summary no longer advertises qcplots", {
   expect_false(any(grepl("Retune|qcplots", txt)))
   expect_true(any(grepl("Report", txt)))
 })
+
+test_that("Q is inert for dye bias, noob and ELBAR, so dropping it changes nothing", {
+  ## methylQC omits Q from the prep string. The justification was a reading of
+  ## sesame's source, and those line numbers have already drifted once, so the
+  ## claim is enforced here instead: if a future sesame makes qualityMask()
+  ## reach dyeBiasNL, noob or ELBAR, this fails and the prep string needs
+  ## revisiting.
+  skip_if_not_installed("sesameData")
+  sdf <- tryCatch(sesameData::sesameDataGet("EPIC.1.SigDF"), error = function(e) NULL)
+  skip_if(is.null(sdf), "sesameData cache unavailable")
+
+  a <- sesame::prepSesame(sdf, "CDB")     # methylQC's chain
+  b <- sesame::prepSesame(sdf, "QCDB")    # with qualityMask prepended
+
+  for (k in c("MG", "MR", "UG", "UR"))
+    expect_equal(a[[k]], b[[k]], info = k)
+
+  pa <- sesame::ELBAR(a, return.pval = TRUE)
+  pb <- sesame::ELBAR(b, return.pval = TRUE)
+  expect_equal(pa, pb)
+
+  ## And the betas methylQC stores are unaffected, with no NA either way.
+  ba <- sesame::getBetas(a, mask = FALSE)
+  bb <- sesame::getBetas(b, mask = FALSE)
+  expect_equal(ba, bb)
+  expect_equal(sum(is.na(ba)), 0L)
+
+  ## Q's only effect is the mask column, which is exactly what methylQC stores
+  ## separately as design_mask.rds.
+  expect_gt(sum(sesame::getBetas(b, mask = TRUE) |> is.na()), 1e5)
+})
+
+test_that("the design mask is a platform property, identical for every sample", {
+  ## This is why applying Q could not change which samples the intensity rule
+  ## flags: it shifts every sample's mean intensity by the same fraction, and
+  ## the rule is cohort-relative.
+  skip_if_not_installed("sesameData")
+  sdf <- tryCatch(sesameData::sesameDataGet("EPIC.1.SigDF"), error = function(e) NULL)
+  skip_if(is.null(sdf), "sesameData cache unavailable")
+  dm <- designmask(sdf)
+  expect_true(is.logical(dm))
+  expect_gt(sum(dm), 1e5)
+  expect_equal(dm, designmask(sesame::prepSesame(sdf, "C")))
+})
